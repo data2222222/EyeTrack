@@ -2,6 +2,8 @@
 
 A calm desktop flow for one focus block: optionally enter a goal, start a 25-minute session (5-minute break), watch a live camera view with a focus score, and review where your attention went. The Chrome extension supplies website activity to the desktop app. Camera observations are estimates, not proof of attention or productivity.
 
+The engine also watches a configurable blacklist of desktop apps and shows an alert when a matching process starts or comes to the foreground. App alerts are paused during scheduled breaks and resume with work.
+
 Two parts:
 - `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session.
 - `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.

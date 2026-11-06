@@ -182,6 +182,7 @@ class FocusWindow(QMainWindow):
         self.controller = engine.camera_controller
         self.report = None
         self.checkin_visible = False
+        self.app_alerts = []
         self.preview_hidden = False
         self.last_tick = time.monotonic()
         self.last_frame = None
@@ -573,7 +574,7 @@ class FocusWindow(QMainWindow):
             self.setup_error.show()
             return
         self.setup_error.hide()
-        self.engine.events.clear()
+        self.clear_session_events()
         self.session_error.clear()
         self.preview_hidden = False
         self.engine.show_preview = True
@@ -616,7 +617,7 @@ class FocusWindow(QMainWindow):
             self.session_error.setText("Couldn't save the summary. Your session is still open; free some space and try again.")
             return False
         self.controller.stop()
-        self.engine.events.clear()
+        self.clear_session_events()
         self.dismiss_checkin()
         self.report = report
         self.show_report(report)
@@ -702,6 +703,25 @@ class FocusWindow(QMainWindow):
             study.record_event("nudge")
             QApplication.alert(self)
 
+    def show_app_alert(self, message):
+        """Show a topmost, non-modal popup for a blacklisted process."""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Distracting process detected")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText("A process matching your app blacklist is running.")
+        dialog.setInformativeText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.app_alerts.append(dialog)
+        dialog.finished.connect(lambda _result, box=dialog:
+                                self.app_alerts.remove(box) if box in self.app_alerts else None)
+        dialog.open()
+
+    def clear_session_events(self):
+        """Clear stale session nudges without dropping app-monitor alerts."""
+        self.engine.events[:] = [event for event in self.engine.events if event[0] == "appblock"]
+
     # ---------------------------------------------------------------- refresh
     def refresh(self):
         now = time.monotonic()
@@ -721,10 +741,18 @@ class FocusWindow(QMainWindow):
             self.connection.style().polish(self.connection)
         if view and self.stack.currentIndex() == 1:
             self.refresh_session(view, camera, browser, connected, now)
+        deferred_events = []
         while self.engine.events:
             kind, message = self.engine.events.pop(0)
-            if view and view["phase"] == "work" and kind in ("nudge", "phone", "doomscroll", "lookaway"):
+            if kind == "appblock":
+                if view and view.get("phase") == "break":
+                    # Keep the alert queued until the break ends.
+                    deferred_events.append((kind, message))
+                else:
+                    self.show_app_alert(message)
+            elif view and view["phase"] == "work" and kind in ("nudge", "phone", "doomscroll", "lookaway"):
                 self.show_checkin(message)
+        self.engine.events[:0] = deferred_events
 
     def refresh_session(self, view, camera, browser, connected, now):
         phase = view["phase"]
