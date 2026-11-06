@@ -58,7 +58,7 @@ The camera starts only for camera-enabled work and is stopped/joined on pause, b
 
 Reports are saved locally in `engine/data/sessions.json`; older reports are preserved. The UI shows the focus score described above, but no mood, XP or streaks. Website and camera categories each describe active time independently. Missing/stale camera observations are unavailable after one second. Browser observation freshness still follows the existing collector's heartbeat; improving event-boundary accounting is a remaining browser task.
 
-The extension's existing focus overlay is an intervention, not navigation blocking. User domain settings, return-to-work behavior and overlay cleanup remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
+**Focus screen (extension):** during a work block, a distracting site is covered by a screen showing the time left in the block, your goal, and who called the site a distraction (`Jev 0.97`, `Jev, cached` or `site list`). **Back to studying** goes back in the tab's history (or to a new tab); **Give me 5 min** unlocks after 10 s, allows that site for 5 minutes and is counted as a skip, shown on the screen. While it is up, keys, scrolling and media playback do not reach the page. It disappears by itself when the block ends, and within 30 s (the extension's heartbeat) when you pause, take a break or end the session. It is an intervention, not navigation blocking. User domain settings remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
 
 ## Goal-aware classification (Jev)
 
