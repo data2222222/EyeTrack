@@ -1,19 +1,29 @@
-// Study Focus Collector: reports the active domain (never the full URL) to the local engine.
-const ENGINE_URL = "http://127.0.0.1:8000/activity";
+// Study Focus Collector: reports the active domain (never the full URL), scrolling and idle state
+// to the local engine, and shows the focus-mode screen on distracting sites during a study session.
+const ENGINE = "http://127.0.0.1:8000";
+const DASHBOARD = ENGINE + "/";
 const IDLE_SECONDS = 60;
 const SWITCH_WINDOW_MS = 5 * 60 * 1000;
+const SCROLL_WINDOW_MS = 60 * 1000;
+const ALLOW_MS = 5 * 60 * 1000;      // "Continue anyway" lasts 5 minutes per site
 
 const PRODUCTIVE = [
   "github.com", "gitlab.com", "stackoverflow.com", "stackexchange.com", "notion.so",
   "docs.google.com", "drive.google.com", "localhost", "127.0.0.1", "developer.mozilla.org",
   "docs.python.org", "w3schools.com", "leetcode.com", "overleaf.com", "coursera.org",
-  "khanacademy.org", "claude.ai",
+  "khanacademy.org", "claude.ai", "wolframalpha.com", "desmos.com", "quizlet.com",
 ];
 const DISTRACTION = [
   "youtube.com", "reddit.com", "x.com", "twitter.com", "instagram.com", "facebook.com",
-  "tiktok.com", "netflix.com", "twitch.tv", "9gag.com",
+  "tiktok.com", "netflix.com", "twitch.tv", "9gag.com", "pinterest.com",
 ];
 // everything else (google.com, wikipedia.org, ...) is neutral
+
+// short-video feeds: each new video counts as a "swipe"
+const FEEDS = [/youtube\.com\/shorts/, /instagram\.com\/(reels?|explore)/, /tiktok\.com/, /facebook\.com\/(reel|watch)/];
+
+const scrollLog = [];   // {t, tabId, px, swipes}  (lives in memory; fine if the worker restarts)
+let lastReport = 0;
 
 function matches(domain, list) {
   return list.some((d) => domain === d || domain.endsWith("." + d));
@@ -44,22 +54,45 @@ async function recentSwitches(addOne) {
   return recent.length;
 }
 
+function scrollFor(tabId) {
+  const now = Date.now();
+  while (scrollLog.length && now - scrollLog[0].t > SCROLL_WINDOW_MS) scrollLog.shift();
+  let px = 0, swipes = 0;
+  for (const s of scrollLog) if (s.tabId === tabId) { px += s.px; swipes += s.swipes; }
+  return { px, swipes };
+}
+
+async function isAllowed(domain) {
+  const { allowUntil = {} } = await chrome.storage.local.get("allowUntil");
+  return (allowUntil[domain] || 0) > Date.now();
+}
+
 const BADGES = {
   "Focused": ["ON", "#1f7a4d"],
   "Distracted": ["!", "#b3261e"],
+  "Doom-scrolling": ["!!", "#8e24aa"],
+  "On Phone": ["📱", "#c2185b"],
   "AFK": ["AFK", "#3a3a3a"],
   "Scattered": ["~", "#b26a00"],
 };
 
 async function report(tabSwitched = false) {
+  lastReport = Date.now();
   let domain = "(outside browser)";
   let category = "other";
+  let tab = null;
+  let scroll = { px: 0, swipes: 0 };
+  let feed = false;
 
   const win = await chrome.windows.getLastFocused().catch(() => null);
   if (win && win.focused) {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     domain = tab && tab.url ? domainOf(tab.url) : "unknown";
     category = categorize(domain);
+    if (tab) {
+      scroll = scrollFor(tab.id);
+      feed = FEEDS.some((re) => re.test(tab.url || ""));
+    }
   }
 
   const payload = {
@@ -67,11 +100,14 @@ async function report(tabSwitched = false) {
     category,
     idle: await chrome.idle.queryState(IDLE_SECONDS),
     switches: await recentSwitches(tabSwitched),
+    scroll_px: scroll.px,
+    swipes: scroll.swipes,
+    feed,
     ts: Date.now(),
   };
 
   try {
-    const res = await fetch(ENGINE_URL, {
+    const res = await fetch(ENGINE + "/activity", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -80,7 +116,14 @@ async function report(tabSwitched = false) {
     const [text, color] = BADGES[status.state] || ["", "#4a5568"];
     chrome.action.setBadgeText({ text });
     chrome.action.setBadgeBackgroundColor({ color });
-    chrome.action.setTitle({ title: `Study Focus: ${status.state} (index ${status.index})` });
+    chrome.action.setTitle({ title: `Study Focus: ${status.state} (index ${status.index}) - click for dashboard` });
+
+    // focus mode: cover distracting sites during the work part of a study session
+    if (tab && status.block && !(await isAllowed(domain))) {
+      chrome.tabs.sendMessage(tab.id, {
+        type: "block", subject: status.subject, goal: status.goal, domain,
+      }).catch(() => {});   // no content script on this page (e.g. opened before install)
+    }
   } catch {
     chrome.action.setBadgeText({ text: "off" });
     chrome.action.setBadgeBackgroundColor({ color: "#777777" });
@@ -103,3 +146,23 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 });
 chrome.windows.onFocusChanged.addListener(() => report());
 chrome.idle.onStateChanged.addListener(() => report());
+chrome.action.onClicked.addListener(() => chrome.tabs.create({ url: DASHBOARD }));
+
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg || !sender.tab) return;
+  if (msg.type === "activity") {
+    scrollLog.push({ t: Date.now(), tabId: sender.tab.id, px: msg.px || 0, swipes: msg.swipes || 0 });
+    if (Date.now() - lastReport > 4000) report();
+  } else if (msg.type === "leave") {
+    chrome.tabs.update(sender.tab.id, { url: DASHBOARD });
+  } else if (msg.type === "allow" && msg.domain) {
+    chrome.storage.local.get("allowUntil").then(({ allowUntil = {} }) => {
+      allowUntil[msg.domain] = Date.now() + ALLOW_MS;
+      chrome.storage.local.set({ allowUntil });
+    });
+    fetch(ENGINE + "/api/override", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: msg.domain }),
+    }).catch(() => {});
+  }
+});
