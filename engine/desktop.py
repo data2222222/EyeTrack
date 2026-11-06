@@ -879,11 +879,12 @@ class FocusWindow(QMainWindow):
             with self.engine.lock:
                 c = dict(self.engine.camera)
             confidence = c.get("phone_confidence")
+            phone_note = " - possible phone, not counted" if c.get("phone_tentative") else ""
             details.setText(f"Camera: {c['status']}\nObservation: {c['reason']}\n"
                             f"Head: yaw {c['yaw']:.3f}, pitch {c['pitch']:.3f}\n"
                             f"Eye estimate: {c['gaze_h']:.3f}, {c['gaze_v']:.3f}\n"
                             f"Phone detector: {c['phone_status']}"
-                            + (f" (confidence {confidence:.2f})" if confidence is not None else "") + "\n"
+                            + (f" (confidence {confidence:.2f}{phone_note})" if confidence else "") + "\n"
                             "These estimates do not establish attention or phone activity.")
         update()
         timer = QTimer(dialog)

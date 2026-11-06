@@ -151,7 +151,7 @@ camera = {"status": "starting", "present": False, "facing": False, "reason": "-"
           "yaw": 0.0, "pitch": 0.0, "gaze_h": 0.5, "gaze_v": 0.0, "gaze_text": "-",
           "eyes_closed": False, "closed_since": None, "expression": "-", "looking_down": False,
           "scores": {n: 0.0 for n in EXPRESSION_NAMES},
-          "phone": False, "phone_since": None, "phone_status": "starting", "phone_confidence": 0.0,
+          "phone": False, "phone_since": None, "phone_status": "starting", "phone_confidence": 0.0, "phone_tentative": False,
           "yawns_total": 0,
           "last_seen": time.time(), "started": time.time()}
 calib = tracking.Calibration()
@@ -877,19 +877,26 @@ def detect_phone(detector, image, tracker, frame_size, context=None):
         elif not state.seen:
             camera["phone_since"] = None
         camera["phone"] = state.seen
-        camera["phone_confidence"] = state.confidence if state.seen else 0.0
+        # a tentative (unconfirmed) phone is shown faintly but never counted: phone_since and
+        # phone stay unset until the tracker is confident
+        camera["phone_confidence"] = state.confidence if (state.seen or state.tentative) else 0.0
+        camera["phone_tentative"] = state.tentative
     return state
 
 
-def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None, phone_confidence=None):
+def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None, phone_confidence=None,
+                 phone_tentative=False):
     """Draw face points, eyes, gaze arrow and phone box (in memory only)."""
     h, w = frame.shape[:2]
     if phone_box:
         x, y, bw, bh = (int(v) for v in phone_box)
-        cv2.rectangle(frame, (x, y), (x + bw, y + bh), (160, 30, 220), 3)
-        label = "PHONE" if phone_confidence is None else f"PHONE {phone_confidence:.0%}"
+        # confident phones are solid purple; unconfirmed ones are a light, thin "maybe"
+        color, thick = ((220, 170, 235), 1) if phone_tentative else ((160, 30, 220), 3)
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, thick)
+        name = "PHONE?" if phone_tentative else "PHONE"
+        label = name if phone_confidence is None else f"{name} {phone_confidence:.0%}"
         cv2.putText(frame, label, (x, max(70, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (160, 30, 220), 2, cv2.LINE_AA)
+                    color, 1 if phone_tentative else 2, cv2.LINE_AA)
 
     def px(i):
         return int(lm[i].x * w), int(lm[i].y * h)
@@ -987,7 +994,7 @@ def camera_loop(camera_index, stop_event=None):
                     phone_tracker.reset()
                     phone_state = phone_detection.PhoneState()
                     set_camera(status="camera interrupted; retrying...", phone=False, phone_since=None,
-                               phone_confidence=0.0, observed_at=None)
+                               phone_confidence=0.0, phone_tentative=False, observed_at=None)
                     preview["png"] = None
                     if time.monotonic() - last_frame >= CAMERA_READ_TIMEOUT:
                         raise RuntimeError("camera stopped delivering frames; reconnect it and restart")
@@ -1027,12 +1034,12 @@ def camera_loop(camera_index, stop_event=None):
                         phone_detector = None
                         phone_tracker.reset()
                         phone_state = phone_detection.PhoneState()
-                        set_camera(phone=False, phone_since=None, phone_confidence=0.0,
+                        set_camera(phone=False, phone_since=None, phone_confidence=0.0, phone_tentative=False,
                                    phone_status=f"off (detector error: {str(exc)[:60]})")
 
                 if show_preview:
                     store_preview(cv2, draw_overlay(cv2, frame, lm, facing, reason, phone_state.box,
-                                                phone_state.confidence))
+                                                phone_state.confidence, phone_state.tentative))
 
                 time.sleep(max(0.0, frame_time - (time.monotonic() - started)))
         set_camera(status="stopped")
@@ -1040,7 +1047,7 @@ def camera_loop(camera_index, stop_event=None):
         set_camera(status=f"camera error ({type(exc).__name__}): {str(exc)[:100]}")
     finally:
         set_camera(present=False, facing=False, phone=False, phone_since=None,
-                   phone_confidence=0.0, phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
+                   phone_confidence=0.0, phone_tentative=False, phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
                    expression="-", scores={n: 0.0 for n in EXPRESSION_NAMES}, observed_at=None)
         calib.interrupt("Camera stopped; look at screen center when it resumes")
         preview["png"] = None
@@ -1689,7 +1696,7 @@ class CameraController:
         self.stop_event = threading.Event()
         self.enabled = False
         set_camera(status="off", present=False, facing=False, phone=False,
-                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    phone_status="off")
 
     def start(self):
@@ -1698,7 +1705,7 @@ class CameraController:
         self.stop_event.clear()
         self.enabled = True
         set_camera(status="starting", present=False, facing=False, phone=False,
-                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    last_seen=time.time())
         if self.simulated:
             set_camera(status="ok", present=True, facing=True, reason="simulated",
@@ -1720,7 +1727,7 @@ class CameraController:
             self.worker.join()
             self.worker = None
         set_camera(status="off", present=False, facing=False, phone=False,
-                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    phone_status="off")
         preview["png"] = None
 
