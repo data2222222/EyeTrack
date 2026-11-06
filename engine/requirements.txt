@@ -10,3 +10,5 @@ numpy
 huggingface-hub
 # dev: pytest (run `python -m pytest engine/tests -q` from the repo root)
 # pytest
+# CA bundle for model downloads on macOS
+certifi

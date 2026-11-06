@@ -17,12 +17,22 @@ pip install -r requirements.txt
 python engine.py                   # first run downloads 2 small models (~10 MB)
 ```
 Options: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only).
-Linux: `sudo apt install python3-tk` if Tk is missing. macOS: allow camera access for the terminal.
+See *Platforms* below for OS notes.
 
 Extension: `chrome://extensions` → **Developer mode** → **Load unpacked** → select `extension/`.
 After updating the extension, press ↻ on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that).
 
 Start a study session in the engine window (live view, **Study session** panel at the bottom).
+
+## Platforms
+
+Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 and 3.12). Use Python 3.10 to 3.12: the `mediapipe` wheels do not cover newer versions yet.
+
+- **Windows**: works out of the box (camera via DirectShow, Segoe UI / Consolas, HiDPI aware). Global hotkeys need no extra permission.
+- **macOS**: python.org Python includes Tk; with Homebrew run `brew install python-tk`. Allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera (the status line says so when it is blocked). Global hotkeys (`pip install pynput`) also need that app under Privacy & Security > Accessibility. Model downloads use the `certifi` CA bundle.
+- **Linux**: `sudo apt install python3-tk` if Tk is missing. Camera via V4L2 (`/dev/video0`, your user must be in the `video` group). Global hotkeys need an X11 session; they do not work on Wayland.
+
+Global hotkeys are optional. If `pynput` is missing or cannot start (permission, Wayland), the engine prints one line and keeps running with the window keys only.
 
 ## Features
 

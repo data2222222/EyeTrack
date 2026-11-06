@@ -24,6 +24,9 @@ import argparse
 import collections
 import json
 import os
+import shutil
+import ssl
+import sys
 import threading
 import time
 import urllib.request
@@ -85,6 +88,14 @@ MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
 PHONE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/object_detector/"
                    "efficientdet_lite0/float16/1/efficientdet_lite0.tflite")
 PHONE_MODEL_PATH = os.path.join(HERE, "efficientdet_lite0.tflite")
+
+# Tk fonts; run_ui replaces these once Tk can list the installed families (see pick_fonts)
+UI_FONT, MONO_FONT = "Helvetica", "Courier"
+FONT_PREFERENCES = {   # sys.platform prefix -> (UI families, monospace families), best first
+    "win": (("Segoe UI",), ("Consolas",)),
+    "darwin": (("SF Pro Text", "Helvetica Neue"), ("Menlo",)),
+    "linux": (("DejaVu Sans",), ("DejaVu Sans Mono",)),
+}
 
 # score of each state for the Productivity Index (AFK is not counted)
 STATE_SCORES = {
@@ -582,6 +593,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_server(port):
+    """Start the local bridge in a daemon thread; port 0 picks a free one (see server.server_address)."""
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -745,9 +757,44 @@ def analyze_face(lm, bs, st, votes, expression_votes):
     return facing, reason
 
 
+def pick_fonts(platform, families, default_family, fixed_family):
+    """(UI font, monospace font): the platform's first installed preference, else Tk's own default fonts."""
+    ui, mono = next((p for prefix, p in FONT_PREFERENCES.items() if platform.startswith(prefix)), ((), ()))
+    return (next((f for f in ui if f in families), default_family),
+            next((f for f in mono if f in families), fixed_family))
+
+
+def camera_backends(cv2, platform):
+    """OpenCV backends to try for this OS, preferred first; 0 (CAP_ANY) is the default backend."""
+    preferred = {"win": "CAP_DSHOW", "darwin": "CAP_AVFOUNDATION", "linux": "CAP_V4L2"}
+    name = next((n for prefix, n in preferred.items() if platform.startswith(prefix)), None)
+    return [getattr(cv2, name)] if name and hasattr(cv2, name) else []
+
+
+def open_camera(cv2, index, platform=sys.platform):
+    """An opened cv2.VideoCapture for the camera, or None. Tries the OS's preferred backend, then the default."""
+    for backend in [*camera_backends(cv2, platform), None]:
+        cap = cv2.VideoCapture(index) if backend is None else cv2.VideoCapture(index, backend)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    return None
+
+
+def ssl_context():
+    """certifi's CA bundle when installed (python.org builds on macOS ship without usable certificates)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def download(url, path):
+    """Fetch url to path through a .part file so an interrupted download never leaves a broken model."""
     if not os.path.exists(path):
-        urllib.request.urlretrieve(url, path + ".part")
+        with urllib.request.urlopen(url, context=ssl_context(), timeout=60) as response, open(path + ".part", "wb") as f:
+            shutil.copyfileobj(response, f)
         os.replace(path + ".part", path)
 
 
@@ -852,6 +899,10 @@ def store_preview(cv2, frame):
         preview["png"] = base64.b64encode(png.tobytes()).decode()
 
 
+CAMERA_DENIED_HINT = ("camera not available: allow camera access for your terminal/Python in "
+                      "System Settings > Privacy & Security > Camera")
+
+
 def camera_loop(camera_index):
     try:
         import cv2
@@ -865,8 +916,7 @@ def camera_loop(camera_index):
     if not os.path.exists(MODEL_PATH):
         set_camera(status="downloading face model...")
         try:
-            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH + ".part")
-            os.replace(MODEL_PATH + ".part", MODEL_PATH)
+            download(MODEL_URL, MODEL_PATH)
         except Exception as e:
             set_camera(status=f"model download failed: {e}")
             return
@@ -882,9 +932,9 @@ def camera_loop(camera_index):
     phone_box = None
     frame_number = 0
 
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        set_camera(status="camera not available")
+    cap = open_camera(cv2, camera_index)
+    if cap is None:
+        set_camera(status=CAMERA_DENIED_HINT if sys.platform == "darwin" else "camera not available")
         return
 
     votes = collections.deque(maxlen=SMOOTHING_FRAMES)
@@ -931,16 +981,20 @@ def camera_loop(camera_index):
 
 # ---------------- optional global hotkeys ----------------
 def start_global_hotkeys():
+    """Needs pynput; macOS also needs Accessibility permission and Linux an X11 session. Any failure just means no hotkeys."""
     try:
         from pynput import keyboard
+        hotkeys = keyboard.GlobalHotKeys({
+            "<ctrl>+<shift>+d": lambda: demo_requests.append("d"),
+            "<ctrl>+<shift>+b": lambda: demo_requests.append("b"),
+        })
+        hotkeys.daemon = True
+        hotkeys.start()
     except ImportError:
         return False
-    hotkeys = keyboard.GlobalHotKeys({
-        "<ctrl>+<shift>+d": lambda: demo_requests.append("d"),
-        "<ctrl>+<shift>+b": lambda: demo_requests.append("b"),
-    })
-    hotkeys.daemon = True
-    hotkeys.start()
+    except Exception as e:   # no display server, missing permission, backend import errors
+        print(f"Global hotkeys unavailable: {e}")
+        return False
     return True
 
 
@@ -955,22 +1009,36 @@ def fmt_clock(seconds):
 
 
 def run_ui(fake_camera, global_keys, compact):
-    global running, show_preview
+    global running, show_preview, UI_FONT, MONO_FONT
     import tkinter as tk
+    import tkinter.font as tkfont
     from tkinter import messagebox
 
     BG, PANEL, FG, MUTED = "#15171a", "#1f2226", "#f2f2f2", "#9aa0a6"
     show_preview = not compact
 
+    if sys.platform == "win32":   # crisp text instead of bitmap-scaled blur on HiDPI screens
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     root = tk.Tk()
+    UI_FONT, MONO_FONT = pick_fonts(
+        sys.platform, set(tkfont.families(root)),
+        tkfont.nametofont("TkDefaultFont").actual("family"), tkfont.nametofont("TkFixedFont").actual("family"))
     root.title("Study Focus")
     root.attributes("-topmost", True)
     root.geometry("+20+20")
     root.configure(bg=BG)
 
     # --- top status bar (always visible) ---
-    bar = tk.Label(root, font=("DejaVu Sans Mono", 12, "bold"), fg="white", padx=12, pady=6, anchor="w")
-    stats = tk.Label(root, font=("DejaVu Sans Mono", 10), fg="white", padx=12, pady=2, anchor="w")
+    bar = tk.Label(root, font=(MONO_FONT, 12, "bold"), fg="white", padx=12, pady=6, anchor="w")
+    stats = tk.Label(root, font=(MONO_FONT, 10), fg="white", padx=12, pady=2, anchor="w")
     bar.pack(fill="x")
     stats.pack(fill="x")
 
@@ -985,7 +1053,7 @@ def run_ui(fake_camera, global_keys, compact):
 
     expr_frame = tk.Frame(left, bg=PANEL, padx=12, pady=8)
     expr_frame.pack(fill="x", pady=(8, 0))
-    expr_title = tk.Label(expr_frame, font=("DejaVu Sans", 13, "bold"), bg=PANEL, fg=FG, anchor="w")
+    expr_title = tk.Label(expr_frame, font=(UI_FONT, 13, "bold"), bg=PANEL, fg=FG, anchor="w")
     expr_title.pack(fill="x")
     expr_canvas = tk.Canvas(expr_frame, width=PREVIEW_WIDTH - 24, height=len(EXPRESSION_NAMES) * 18,
                             bg=PANEL, highlightthickness=0)
@@ -994,9 +1062,9 @@ def run_ui(fake_camera, global_keys, compact):
     info = tk.Frame(body, bg=PANEL, padx=14, pady=10)
     info.grid(row=0, column=1, padx=(6, 10), pady=10, sticky="nsew")
 
-    state_big = tk.Label(info, font=("DejaVu Sans", 22, "bold"), bg=PANEL, fg=FG, anchor="w")
+    state_big = tk.Label(info, font=(UI_FONT, 22, "bold"), bg=PANEL, fg=FG, anchor="w")
     state_big.pack(fill="x")
-    reason = tk.Label(info, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED, anchor="w",
+    reason = tk.Label(info, font=(UI_FONT, 10), bg=PANEL, fg=MUTED, anchor="w",
                       justify="left", wraplength=340)
     reason.pack(fill="x", pady=(0, 8))
 
@@ -1007,17 +1075,17 @@ def run_ui(fake_camera, global_keys, compact):
              "Doom-scroll", "Context", "Extension", "Active time", "Focused", "Distracted", "Nudge",
              "Next break"]
     for i, name in enumerate(names):
-        tk.Label(grid, text=name, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED,
+        tk.Label(grid, text=name, font=(UI_FONT, 10), bg=PANEL, fg=MUTED,
                  anchor="w").grid(row=i, column=0, sticky="w", pady=1)
-        rows[name] = tk.Label(grid, font=("DejaVu Sans Mono", 10), bg=PANEL, fg=FG, anchor="w")
+        rows[name] = tk.Label(grid, font=(MONO_FONT, 10), bg=PANEL, fg=FG, anchor="w")
         rows[name].grid(row=i, column=1, sticky="w", padx=(12, 0), pady=1)
 
-    tk.Label(info, text="Productivity Index (last 10 min)", font=("DejaVu Sans", 10),
+    tk.Label(info, text="Productivity Index (last 10 min)", font=(UI_FONT, 10),
              bg=PANEL, fg=MUTED, anchor="w").pack(fill="x", pady=(10, 2))
     index_canvas = tk.Canvas(info, width=340, height=22, bg="#2b2f34", highlightthickness=0)
     index_canvas.pack(anchor="w")
 
-    tk.Label(info, text=f"State timeline (last {TIMELINE_SECONDS // 60} min)", font=("DejaVu Sans", 10),
+    tk.Label(info, text=f"State timeline (last {TIMELINE_SECONDS // 60} min)", font=(UI_FONT, 10),
              bg=PANEL, fg=MUTED, anchor="w").pack(fill="x", pady=(10, 2))
     timeline_canvas = tk.Canvas(info, width=340, height=18, bg="#2b2f34", highlightthickness=0)
     timeline_canvas.pack(anchor="w")
@@ -1029,9 +1097,9 @@ def run_ui(fake_camera, global_keys, compact):
     work_var, break_var = tk.StringVar(value="25"), tk.StringVar(value="5")
 
     def field(parent, label, **opts):
-        tk.Label(parent, text=label, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED).pack(side="left", padx=(0, 4))
+        tk.Label(parent, text=label, font=(UI_FONT, 10), bg=PANEL, fg=MUTED).pack(side="left", padx=(0, 4))
         w = (tk.Spinbox if "from_" in opts else tk.Entry)(
-            parent, font=("DejaVu Sans Mono", 10), bg="#2b2f34", fg=FG, insertbackground=FG,
+            parent, font=(MONO_FONT, 10), bg="#2b2f34", fg=FG, insertbackground=FG,
             relief="flat", **opts)
         w.pack(side="left", padx=(0, 10))
         return w
@@ -1045,7 +1113,7 @@ def run_ui(fake_camera, global_keys, compact):
     start_button.pack(side="left")
 
     run_row = tk.Frame(study_panel, bg=PANEL)
-    run_label = tk.Label(run_row, font=("DejaVu Sans Mono", 10), bg=PANEL, fg=FG, anchor="w")
+    run_label = tk.Label(run_row, font=(MONO_FONT, 10), bg=PANEL, fg=FG, anchor="w")
     run_label.pack(side="left", padx=(0, 14))
     phase_button = tk.Button(run_row, width=10)
     phase_button.pack(side="left", padx=(0, 6))
@@ -1053,7 +1121,7 @@ def run_ui(fake_camera, global_keys, compact):
     stop_button.pack(side="left")
 
     profile_row = tk.Frame(study_panel, bg=PANEL)
-    profile_label = tk.Label(profile_row, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED, anchor="w")
+    profile_label = tk.Label(profile_row, font=(UI_FONT, 10), bg=PANEL, fg=MUTED, anchor="w")
     profile_label.pack(side="left")
     history_button = tk.Button(profile_row, text="History", width=8)
     history_button.pack(side="right")
@@ -1065,7 +1133,7 @@ def run_ui(fake_camera, global_keys, compact):
         keys += " · P presence · F facing"
     if global_keys:
         keys += "  (global: Ctrl+Shift+D/B)"
-    hint = tk.Label(root, text=keys, font=("DejaVu Sans Mono", 8), fg="#dddddd", padx=12, pady=4, anchor="w")
+    hint = tk.Label(root, text=keys, font=(MONO_FONT, 8), fg="#dddddd", padx=12, pady=4, anchor="w")
 
     def layout():
         body.pack_forget()
@@ -1083,8 +1151,8 @@ def run_ui(fake_camera, global_keys, compact):
         win.title("Study Focus")
         win.attributes("-topmost", True)
         win.configure(bg=color)
-        tk.Label(win, text=title, font=("DejaVu Sans", 18, "bold"), bg=color, fg="white").pack(padx=30, pady=(20, 6))
-        tk.Label(win, text=message, font=("DejaVu Sans", 12), bg=color, fg="white", justify="center").pack(padx=30, pady=6)
+        tk.Label(win, text=title, font=(UI_FONT, 18, "bold"), bg=color, fg="white").pack(padx=30, pady=(20, 6))
+        tk.Label(win, text=message, font=(UI_FONT, 12), bg=color, fg="white", justify="center").pack(padx=30, pady=6)
         buttons = tk.Frame(win, bg=color)
         buttons.pack(pady=(10, 20))
         if kind == "nudge":
@@ -1092,7 +1160,7 @@ def run_ui(fake_camera, global_keys, compact):
             tk.Button(buttons, text="5 more minutes", width=14,
                       command=lambda: (snooze(), win.destroy())).pack(side="left", padx=6)
         elif kind == "break":
-            counter = tk.Label(buttons, font=("DejaVu Sans Mono", 22, "bold"), bg=color, fg="white")
+            counter = tk.Label(buttons, font=(MONO_FONT, 22, "bold"), bg=color, fg="white")
             counter.pack()
 
             def countdown(left=EYE_REST_SECONDS):
@@ -1147,7 +1215,7 @@ def run_ui(fake_camera, global_keys, compact):
         box.pack(padx=10, pady=10)
 
         def line(text, size=10, color=FG, bold=False, pady=1):
-            tk.Label(box, text=text, font=("DejaVu Sans", size, "bold" if bold else "normal"), bg=PANEL,
+            tk.Label(box, text=text, font=(UI_FONT, size, "bold" if bold else "normal"), bg=PANEL,
                      fg=color, anchor="w", justify="left", wraplength=440).pack(fill="x", pady=pady)
 
         line(f"{report['subject']} · {report['duration_min']} min", 16, bold=True)
@@ -1166,7 +1234,7 @@ def run_ui(fake_camera, global_keys, compact):
             line("Mood: " + ", ".join(f"{m} {p}%" for m, p in report["moods"]))
         blink = f"{report['avg_blink']} / min" if report["avg_blink"] is not None else "n/a"
         line(f"Blink rate {blink} · Yawns {report['yawns']}")
-        tk.Label(box, text="Timeline", font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED,
+        tk.Label(box, text="Timeline", font=(UI_FONT, 10), bg=PANEL, fg=MUTED,
                  anchor="w").pack(fill="x", pady=(8, 2))
         canvas = tk.Canvas(box, width=440, height=18, bg="#2b2f34", highlightthickness=0)
         canvas.pack(anchor="w")
@@ -1184,7 +1252,7 @@ def run_ui(fake_camera, global_keys, compact):
         win = new_window("Past sessions")
         past = study.report_list()
         listbox = tk.Listbox(win, width=64, height=min(15, max(3, len(past))), bg=PANEL, fg=FG,
-                             font=("DejaVu Sans Mono", 10), selectbackground="#5b8def",
+                             font=(MONO_FONT, 10), selectbackground="#5b8def",
                              highlightthickness=0, relief="flat", exportselection=False)
         listbox.pack(padx=10, pady=10)
         for r in past:
@@ -1203,11 +1271,11 @@ def run_ui(fake_camera, global_keys, compact):
 
     def show_tips():
         win = new_window("Study tips")
-        tk.Label(win, text="Stuck? Pick a technique", font=("DejaVu Sans", 12, "bold"), bg=BG,
+        tk.Label(win, text="Stuck? Pick a technique", font=(UI_FONT, 12, "bold"), bg=BG,
                  fg=FG).pack(padx=20, pady=(14, 6))
         buttons = tk.Frame(win, bg=BG)
         buttons.pack(padx=20)
-        text = tk.Label(win, font=("DejaVu Sans", 11), bg=PANEL, fg=FG, wraplength=340, justify="left",
+        text = tk.Label(win, font=(UI_FONT, 11), bg=PANEL, fg=FG, wraplength=340, justify="left",
                         padx=14, pady=10, text="Try one of the buttons above.")
         for label, mode in (("Explain simpler", "explain"), ("Easy examples", "example"), ("Quiz me", "quiz")):
             tk.Button(buttons, text=label, width=14,
@@ -1298,7 +1366,7 @@ def run_ui(fake_camera, global_keys, compact):
                 fake = "FACE PRESENT" if camera["present"] else "NO FACE"
                 fake += " + FACING" if camera["facing"] else ""
             cam_label.config(text=f"--no-camera mode\n\n{fake}\n\nP = presence   F = facing",
-                             font=("DejaVu Sans Mono", 12), fg=FG)
+                             font=(MONO_FONT, 12), fg=FG)
         else:
             with lock:
                 cam_label.config(text=camera["status"], fg=MUTED)
@@ -1310,18 +1378,18 @@ def run_ui(fake_camera, global_keys, compact):
         for i, name in enumerate(EXPRESSION_NAMES):
             y = i * 18
             value = max(0.0, min(1.0, scores.get(name, 0.0)))
-            expr_canvas.create_text(0, y + 8, text=name, anchor="w", fill=MUTED, font=("DejaVu Sans", 9))
+            expr_canvas.create_text(0, y + 8, text=name, anchor="w", fill=MUTED, font=(UI_FONT, 9))
             expr_canvas.create_rectangle(100, y + 3, 100 + width, y + 14, fill="#2b2f34", width=0)
             expr_canvas.create_rectangle(100, y + 3, 100 + int(width * value), y + 14, fill="#5b8def", width=0)
             expr_canvas.create_text(104 + width, y + 8, text=f"{value:.2f}", anchor="w", fill=FG,
-                                    font=("DejaVu Sans Mono", 8))
+                                    font=(MONO_FONT, 8))
 
     def draw_index(value):
         index_canvas.delete("all")
         color = "#1f7a4d" if value >= 70 else "#b26a00" if value >= 40 else "#b3261e"
         index_canvas.create_rectangle(0, 0, int(340 * value / 100), 22, fill=color, width=0)
         index_canvas.create_text(8, 11, text=f"{value}", anchor="w", fill="white",
-                                 font=("DejaVu Sans Mono", 10, "bold"))
+                                 font=(MONO_FONT, 10, "bold"))
 
     def draw_timeline():
         timeline_canvas.delete("all")
