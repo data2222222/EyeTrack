@@ -1,13 +1,27 @@
 # Study Focus: a camera + browser study coach
 
-Study Focus watches *how* you study (browser activity plus your webcam, processed only on your laptop) and helps you stay focused: Pomodoro sessions, distraction and doom-scroll detection, phone detection, tiredness and frustration alerts, an AI tutor, session reports, XP and streaks.
+Study Focus watches *how* you study (browser activity plus your webcam, processed only on your laptop) and helps you stay focused: Pomodoro sessions, distraction and doom-scroll detection, phone detection, tiredness and frustration alerts, study tips when you're stuck, session reports, XP and streaks.
 
-Three parts:
-- `extension/`: Chrome extension. Sends the active **domain** (never the full URL), scrolling amount, idle state and tab switches to the engine. Shows the focus-mode screen on distracting sites during a study session. Clicking the icon opens the dashboard.
-- `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window and the local server on `127.0.0.1:8000`.
-- `engine/study.py` + `engine/dashboard.html`: study sessions, XP, reports, AI helper, and the web dashboard at **http://127.0.0.1:8000**.
+Two parts:
+- `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session.
+- `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.
+- `engine/study.py`: study sessions, XP, reports and study tips, used by the window.
 
-## Setup
+## Quick start
+
+```bash
+python setup.py        # python3 setup.py on macOS/Linux
+```
+One script, safe to re-run. It checks Python (3.10 to 3.12) and Tk, creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
+
+**The one manual step** (Chrome does not allow installing an extension silently): on the page that opens, turn on **Developer mode** (top right), click **Load unpacked**, paste the path (Ctrl+L, or Cmd+Shift+G on macOS) or pick the folder that opened.
+
+Later runs: `start.bat` (Windows) or `./start.sh` (macOS/Linux). Both pass options through to the engine: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only). See *Platforms* below for OS notes.
+
+After updating the extension, press the reload icon on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that). Start a study session in the engine window (**Study session** panel at the bottom).
+
+<details>
+<summary>Manual setup</summary>
 
 ```bash
 cd engine
@@ -16,17 +30,22 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python engine.py                   # first run downloads 2 small models (~10 MB)
 ```
-Options: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only).
-Linux: `sudo apt install python3-tk` if Tk is missing. macOS: allow camera access for the terminal.
+Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > select `extension/`.
+</details>
 
-Extension: `chrome://extensions` → **Developer mode** → **Load unpacked** → select `extension/`.
-After updating the extension, press ↻ on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that).
+## Platforms
 
-Open the dashboard: click the extension icon, or go to http://127.0.0.1:8000
+Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 and 3.12). Use Python 3.10 to 3.12: the `mediapipe` wheels do not cover newer versions yet.
+
+- **Windows**: works out of the box (camera via DirectShow, Segoe UI / Consolas, HiDPI aware). Global hotkeys need no extra permission.
+- **macOS**: python.org Python includes Tk; with Homebrew run `brew install python-tk`. Allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera (the status line says so when it is blocked). Global hotkeys (`pip install pynput`) also need that app under Privacy & Security > Accessibility. Model downloads use the `certifi` CA bundle.
+- **Linux**: `sudo apt install python3-tk` if Tk is missing. Camera via V4L2 (`/dev/video0`, your user must be in the `video` group). Global hotkeys need an X11 session; they do not work on Wayland.
+
+Global hotkeys are optional. If `pynput` is missing or cannot start (permission, Wayland), the engine prints one line and keeps running with the window keys only.
 
 ## Features
 
-**Study sessions (dashboard)**: subject + goal + Pomodoro (25/5 by default). During focus blocks, **Focus mode** is on: distracting sites get a full-page "You're in a study session" screen with *Back to studying* or *Continue anyway* (enabled after 10 s, allows that site for 5 min; counted in the report). During breaks there are no distraction alerts.
+**Study sessions (engine window)**: type a subject and goal, set work/break minutes (25/5 by default) and press **Start session**. While it runs the panel shows the phase and countdown with **Break / Resume** and **Stop** (asks "Did you reach your goal?", then shows the report). A profile line shows level, XP to the next level, streak and badges; **History** lists past sessions and opens their reports. During focus blocks, **Focus mode** is on: distracting sites get a full-page "You're in a study session" screen with *Back to studying* (goes back in the tab's history, or to a new tab) or *Continue anyway* (enabled after 10 s, allows that site for 5 min; counted in the report). During breaks there are no distraction alerts.
 
 **Distraction detection**
 - *Distracted*: distracting site + eyes on it → nudge after 60 s.
@@ -34,15 +53,31 @@ Open the dashboard: click the extension icon, or go to http://127.0.0.1:8000
 - *On Phone*: the camera's object detector sees a phone for 3+ s → state "On Phone", counts a pickup; popup after 20 s.
 - *Context switching*: switches between sites/apps in the last 30 min and the average minutes per task (attention span).
 
-**Wellbeing (camera)**: eye gaze (iris + model eye-direction), blink rate, eyes closed ≥2 s (sleepy), yawns, expressions (Happy, Concentrating, Frustrated, Confused, Unhappy, Yawning). Tired → "Start break now"; frustrated for most of a minute → "Stuck?" with a button to the AI helper; blink rate < 6/min → eye-rest popup. Expressions are estimates of facial movement, not mind reading.
+**Wellbeing (camera)**: eye gaze (iris + model eye-direction), blink rate, eyes closed ≥2 s (sleepy), yawns, expressions (Happy, Concentrating, Frustrated, Confused, Unhappy, Yawning). Tired → "Start break now"; frustrated for most of a minute → "Stuck?" with a button to the study tips; blink rate < 6/min → eye-rest popup. Expressions are estimates of facial movement, not mind reading.
 
-**AI study helper**: *Explain simpler*, *Easy examples*, *Quiz me* for whatever you're stuck on, in your language. Needs an Anthropic API key:
+**Study tips**: *Explain simpler*, *Easy examples*, *Quiz me* in the "Stuck?" popup (button *Study tips*) give a built-in study technique for when you're stuck. They work offline and send nothing anywhere.
+
+**Reports, XP, streaks**: when you stop a session a report window opens: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
+
+## Goal-aware classification (Jev)
+
+During a study session, the site lists in the extension are only a fallback. Each tab is also judged against your session (`subject: goal`) by Jev (TypeSafe), so a physics lecture on youtube.com can count as *productive* and funny cats as *distraction*. The decision matrix below is unchanged; only the category it receives gets smarter. Outside a study session nothing is sent and the extension's lists apply as before.
+
+**Setup**
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...      # before python engine.py
+pip install -r requirements.txt
+export TYPESAFE_API_KEY=...                 # or {"typesafe_api_key": "..."} in engine/data/config.json
+python -m classifier.fetch_model            # optional offline model (~90 MB) into engine/models/
+python -m classifier.spike                  # optional: try 5 sample pages against Jev
 ```
-or create `engine/data/config.json`: `{"anthropic_api_key": "sk-ant-..."}`. Without a key you get offline study tips.
 
-**Reports, XP, streaks**: at the end of a session you get a report: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
+**What is sent to Jev**: your goal (subject + goal text), the domain, the URL path without query or fragment, and the page title (plus the browser name, "Chrome"). Never camera frames. Never incognito tabs, password managers, banking sites or anything on your own never-send list (`"classifier": {"never_send": {"domains": [...], "apps": [...]}}` in `config.json`): those are not sent, not even to the local model.
+
+**How it behaves**: one question per page ("productive, neutral or distraction?"). Answers are cached in `engine/data/classifications.json` for 7 days, per site + page title + goal. At most 5 requests per domain per hour; after that the latest answer for that domain is reused. Answers with confidence below 0.5 are discarded. Requests run in the background, so a new page keeps its list category until Jev answers (a few seconds, shown as "Jev pending").
+
+**Where you see it**: the *Category* row shows the verdict and its source, e.g. `distraction (Jev 0.97)`, `productive (Jev, cached)`, `productive (list)`. The source is one of `jev`, `cache`, `override`, `private`, `list`; "Jev pending" is shown while an answer is on its way.
+
+**Fallbacks**: no key, no `typesafe-sdk` or no network → the extension's lists are used (the engine never needs Jev to run). A small local model (MiniLM, `engine/models/`) scores similarity to your goal as a second opinion; its guesses are never strong enough to override the lists today. If the classifier cannot be imported the engine prints one line and behaves exactly as before.
 
 ## Decision matrix
 
@@ -60,11 +95,11 @@ or create `engine/data/config.json`: `{"anthropic_api_key": "sk-ant-..."}`. With
 
 **Productivity Index**: time-weighted average of state scores over the last 10 minutes.
 
-## Demo keys (desktop window) / demo buttons (dashboard)
+## Demo keys (desktop window)
 D distraction · S doom-scroll · M phone · T tired · X stuck · B eye break · C recalibrate · V live view · Q quit.
 
 ## Accuracy tips
 Look at the middle of the screen and press **C** (2 s). Light on your face, no bright window behind you. Thresholds are at the top of `engine.py` (`YAW_TOLERANCE`, `GAZE_H_TOLERANCE`, `DOOM_SCROLL_PX`, `PHONE_SCORE`, …). For a live demo, `NUDGE_AFTER_SECONDS = 15` and `DOOM_AFTER_SECONDS = 20` make alerts fire faster.
 
 ## Privacy
-Camera frames stay in memory and are never saved or uploaded. The extension sends domains and scroll counts only to `127.0.0.1`. The local server refuses requests from other websites. Only the AI helper sends text (your question + subject) to the AI provider, and only when you click it.
+Camera frames stay in memory and are never saved or uploaded. The extension sends the domain, the URL path (no query string or fragment), the page title and scroll counts to `127.0.0.1` only; incognito tabs send the domain only. The local server refuses requests from other websites. Text leaves your laptop in one case only: **during a study session with a Jev key configured**, your goal, the domain, URL path and page title of the active tab are sent to the Jev API to classify it (see *Goal-aware classification*). Without a key, nothing about your pages leaves the machine.

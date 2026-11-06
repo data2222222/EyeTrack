@@ -17,17 +17,19 @@ Window keys (click the window first):
     C  recalibrate "looking at the screen" (look at the screen center for 2 s)
     V  show / hide the live view
     Q  quit
+Study sessions are started in the live view: subject, goal, work/break minutes, Start / Break / Stop, History.
 Optional global hotkeys (if `pip install pynput`): Ctrl+Shift+D, Ctrl+Shift+B
 """
 import argparse
-import base64
 import collections
 import json
 import os
+import shutil
+import ssl
+import sys
 import threading
 import time
 import urllib.request
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import study
@@ -80,13 +82,20 @@ PHONE_EVERY_N_FRAMES = 3         # run the phone detector on every 3rd frame (sa
 CONTEXT_WINDOW = 30 * 60         # context-switch stats over the last 30 minutes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DASHBOARD_PATH = os.path.join(HERE, "dashboard.html")
 MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
              "face_landmarker/float16/1/face_landmarker.task")
 MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
 PHONE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/object_detector/"
                    "efficientdet_lite0/float16/1/efficientdet_lite0.tflite")
 PHONE_MODEL_PATH = os.path.join(HERE, "efficientdet_lite0.tflite")
+
+# Tk fonts; run_ui replaces these once Tk can list the installed families (see pick_fonts)
+UI_FONT, MONO_FONT = "Helvetica", "Courier"
+FONT_PREFERENCES = {   # sys.platform prefix -> (UI families, monospace families), best first
+    "win": (("Segoe UI",), ("Consolas",)),
+    "darwin": (("SF Pro Text", "Helvetica Neue"), ("Menlo",)),
+    "linux": (("DejaVu Sans",), ("DejaVu Sans Mono",)),
+}
 
 # score of each state for the Productivity Index (AFK is not counted)
 STATE_SCORES = {
@@ -127,7 +136,6 @@ POPUP_STYLE = {  # kind: (title, color)
     "phone": ("Phone check", "#c2185b"),
     "pomodoro": ("Pomodoro", "#2e7d6b"),
 }
-DASHBOARD_URL = "http://127.0.0.1:8000/"
 EXPRESSION_NAMES = ["Smile", "Frown", "Brow down", "Brow raise", "Jaw open", "Eyes closed"]
 
 # ---------------- shared state ----------------
@@ -135,7 +143,10 @@ lock = threading.Lock()
 running = True
 show_preview = True
 browser = {"domain": "waiting for extension", "category": "neutral", "idle": "active",
-           "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False}
+           "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False,
+           "category_source": "list", "category_confidence": None, "category_pending": False}
+jev = None            # goal-aware classifier (engine/classifier), None if unavailable
+JevSurface = None
 camera = {"status": "starting", "present": False, "facing": False, "reason": "-",
           "yaw": 0.0, "pitch": 0.0, "gaze_h": 0.5, "gaze_v": 0.0, "gaze_text": "-",
           "eyes_closed": False, "closed_since": None, "expression": "-",
@@ -152,7 +163,6 @@ session = {"active_seconds": 0.0, "focused_seconds": 0.0, "distracted_seconds": 
            "doom_streak": 0.0, "doom_alerted": False, "on_phone": False,
            "state": "Starting", "index": 100}
 switch_log = collections.deque()      # timestamps of website/app switches
-recent_events = collections.deque(maxlen=20)  # popups, also shown as toasts on the dashboard
 last_alert = {}                       # wellbeing popup kind -> time shown
 history = collections.deque()         # (timestamp, score, weight_seconds)
 timeline = collections.deque()        # (timestamp, state) for the colored strip
@@ -163,13 +173,8 @@ demo_requests = []                    # filled by global hotkeys (other thread)
 
 # ---------------- decision engine ----------------
 def emit(kind, message):
-    """Queue a popup; the window shows it and the dashboard gets it as a toast."""
+    """Queue a popup for the window."""
     events.append((kind, message))
-
-
-def publish(kind, message):
-    title = POPUP_STYLE.get(kind, ("Study Focus", ""))[0]
-    recent_events.append({"id": f"{time.time():.3f}", "kind": kind, "title": title, "text": message})
 
 
 def assess(category, idle, switches, present, facing, missing_seconds, on_phone=False, doom=False):
@@ -392,7 +397,7 @@ def simulate_tired():
 def simulate_stuck():
     study.record_event("stuck")
     emit("stuck", "You look stuck or frustrated.\n"
-                  "Try an easier example, re-read the basics,\nor ask the AI helper.")
+                  "Try an easier example, re-read the basics,\nor open the study tips.")
 
 
 def simulate_phone():
@@ -437,6 +442,38 @@ def snooze():
     session["nudged"] = False
 
 
+def init_classifier():
+    """Optional goal-aware classifier. Any failure leaves the extension's list categories in charge."""
+    global jev, JevSurface
+    try:
+        from classifier import Surface, build_default
+        jev, JevSurface = build_default(), Surface
+    except Exception as e:
+        print(f"Goal-aware classifier unavailable ({type(e).__name__}); using the extension's site lists.")
+
+
+def judge(data, domain):
+    """Goal-aware verdict for the active tab, or None to keep the extension's list category.
+    Only during a study session (the goal is the context). Never blocks: Jev answers in the background."""
+    sv = study.session_view()
+    if jev is None or not sv or data.get("category") == "other":
+        return None
+    surface = JevSurface("browser", "Chrome", None, domain, str(data.get("path") or "")[:200] or None,
+                         str(data.get("title") or "")[:200] or None, bool(data.get("incognito")))
+    try:
+        return jev.classify(f"{sv['subject']}: {sv['goal']}", surface)
+    except Exception:
+        return None
+
+
+def category_text(b):
+    """'distraction (Jev 0.97)' / 'productive (list)' for the info panel."""
+    src, conf = b["category_source"], b["category_confidence"]
+    how = {"jev": f"Jev {conf:.2f}" if conf is not None else "Jev", "cache": "Jev, cached",
+           "override": "override", "private": "list, private"}.get(src, "list")
+    return f"{b['category']} ({how}{', Jev pending' if b['category_pending'] else ''})"
+
+
 def snapshot():
     with lock:
         snap = {"state": session["state"], "index": session["index"],
@@ -450,38 +487,6 @@ def snapshot():
     return snap
 
 
-def api_state():
-    """Everything the dashboard shows, in one JSON."""
-    now = time.time()
-    rate = blink_rate(now)
-    switches, span = context_stats(now)
-    with lock:
-        b = dict(browser)
-        c = dict(camera)
-        cam = camera_text()
-        yawn_count = sum(1 for t in yawns if now - t <= YAWN_WINDOW)
-    state = session["state"]
-    live = {
-        "state": state, "color": STATE_COLORS.get(state, "#4a5568"), "explain": explain(state, b["category"]),
-        "index": session["index"], "domain": b["domain"], "category": b["category"],
-        "extension_ok": bool(b["updated"]) and now - b["updated"] <= EXTENSION_STALE_SECONDS,
-        "camera": cam, "camera_status": c["status"], "attention": c["reason"],
-        "calibrating": calib["active"] and c["status"] == "ok",
-        "gaze": c["gaze_text"], "expression": c["expression"], "scores": c["scores"],
-        "blink_rate": round(rate) if rate is not None else None, "yawns_10min": yawn_count,
-        "phone": session["on_phone"], "phone_status": c["phone_status"],
-        "doom_level": round(min(1.0, session["doom_streak"] / DOOM_AFTER_SECONDS), 2),
-        "scroll_px": b["scroll_px"], "swipes": b["swipes"], "feed": b["feed"],
-        "switches_30min": switches, "attention_span_min": span,
-        "active_seconds": round(session["active_seconds"]),
-        "focused_seconds": round(session["focused_seconds"]),
-        "distracted_seconds": round(session["distracted_seconds"]),
-        "has_frame": preview["png"] is not None,
-    }
-    return {"live": live, "session": study.session_view(), "profile": study.profile_view(),
-            "events": list(recent_events), "ai_ready": bool(study.ai_settings()[0])}
-
-
 def camera_text():
     s = camera["status"]
     if s != "ok":
@@ -493,7 +498,7 @@ def camera_text():
 
 # ---------------- local bridge (HTTP) ----------------
 class Handler(BaseHTTPRequestHandler):
-    """Only this machine's dashboard and the Chrome extension may talk to the engine.
+    """Only this machine and the Chrome extension may talk to the engine.
     Other websites can't read camera frames or state (no CORS headers, Origin + Host checks)."""
 
     def allowed(self):
@@ -535,27 +540,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.send_json(403, {"error": "forbidden"})
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
-            try:
-                with open(DASHBOARD_PATH, "rb") as f:
-                    self.send_body(200, f.read(), "text/html; charset=utf-8")
-            except OSError:
-                self.send_json(404, {"error": "dashboard.html missing"})
-        elif path == "/status":
+        if path == "/status":
             self.send_json(200, snapshot())
-        elif path == "/api/state":
-            self.send_json(200, api_state())
-        elif path == "/api/frame":
-            data = preview["png"]
-            if data:
-                self.send_body(200, base64.b64decode(data), "image/png")
-            else:
-                self.send_json(404, {"error": "no frame"})
-        elif path == "/api/reports":
-            self.send_json(200, study.report_list())
-        elif path.startswith("/api/reports/"):
-            report = study.get_report(path.rsplit("/", 1)[-1])
-            self.send_json(200 if report else 404, report or {"error": "not found"})
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -569,13 +555,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/activity":
             now = time.time()
+            domain = str(data.get("domain", "-"))[:80]
+            verdict = judge(data, domain)   # outside the lock; never blocks
             with lock:
-                domain = str(data.get("domain", "-"))[:80]
                 if domain != browser["domain"] and browser["updated"]:
                     switch_log.append(now)
                 browser["domain"] = domain
                 if data.get("category") in ("productive", "distraction", "neutral", "other"):
                     browser["category"] = data["category"]
+                # Jev/cache/override replace the list category; local guesses never do (list stays)
+                browser.update(category_source="list", category_confidence=None, category_pending=False)
+                if verdict:
+                    browser["category_pending"] = verdict.pending
+                    if verdict.source == "private":
+                        browser["category_source"] = "private"
+                    elif verdict.category and not verdict.pending and verdict.source in ("jev", "cache", "override"):
+                        browser.update(category=verdict.category, category_source=verdict.source,
+                                       category_confidence=verdict.confidence)
                 if data.get("idle") in ("active", "idle", "locked"):
                     browser["idle"] = data["idle"]
                 for key in ("switches", "scroll_px", "swipes"):
@@ -586,34 +582,9 @@ class Handler(BaseHTTPRequestHandler):
                 browser["feed"] = bool(data.get("feed", False))
                 browser["updated"] = now
             self.send_json(200, snapshot())
-        elif path == "/api/session/start":
-            ok, message = study.start_session(str(data.get("subject", "")), str(data.get("goal", "")),
-                                              data.get("work", 25), data.get("break", 5))
-            self.send_json(200 if ok else 409, {"ok": ok, "message": message})
-        elif path == "/api/session/stop":
-            report = study.stop_session(bool(data.get("goal_done")))
-            self.send_json(200 if report else 409, report or {"error": "no session"})
-        elif path == "/api/session/break":
-            self.send_json(200, {"ok": study.start_break()})
-        elif path == "/api/session/resume":
-            self.send_json(200, {"ok": study.resume_work()})
-        elif path == "/api/ai":
-            self.send_json(200, study.ask_ai(str(data.get("subject", ""))[:80],
-                                             str(data.get("question", ""))[:1500],
-                                             str(data.get("mode", "explain"))))
         elif path == "/api/override":
             study.record_event("override")
             self.send_json(200, {"ok": True})
-        elif path == "/api/calibrate":
-            reset_calibration()
-            self.send_json(200, {"ok": True})
-        elif path.startswith("/api/demo/"):
-            key = path.rsplit("/", 1)[-1]
-            if key in DEMO_ACTIONS:
-                demo_requests.append(key)
-                self.send_json(200, {"ok": True})
-            else:
-                self.send_json(404, {"error": "unknown demo"})
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -622,6 +593,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_server(port):
+    """Start the local bridge in a daemon thread; port 0 picks a free one (see server.server_address)."""
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -785,9 +757,44 @@ def analyze_face(lm, bs, st, votes, expression_votes):
     return facing, reason
 
 
+def pick_fonts(platform, families, default_family, fixed_family):
+    """(UI font, monospace font): the platform's first installed preference, else Tk's own default fonts."""
+    ui, mono = next((p for prefix, p in FONT_PREFERENCES.items() if platform.startswith(prefix)), ((), ()))
+    return (next((f for f in ui if f in families), default_family),
+            next((f for f in mono if f in families), fixed_family))
+
+
+def camera_backends(cv2, platform):
+    """OpenCV backends to try for this OS, preferred first; 0 (CAP_ANY) is the default backend."""
+    preferred = {"win": "CAP_DSHOW", "darwin": "CAP_AVFOUNDATION", "linux": "CAP_V4L2"}
+    name = next((n for prefix, n in preferred.items() if platform.startswith(prefix)), None)
+    return [getattr(cv2, name)] if name and hasattr(cv2, name) else []
+
+
+def open_camera(cv2, index, platform=sys.platform):
+    """An opened cv2.VideoCapture for the camera, or None. Tries the OS's preferred backend, then the default."""
+    for backend in [*camera_backends(cv2, platform), None]:
+        cap = cv2.VideoCapture(index) if backend is None else cv2.VideoCapture(index, backend)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    return None
+
+
+def ssl_context():
+    """certifi's CA bundle when installed (python.org builds on macOS ship without usable certificates)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def download(url, path):
+    """Fetch url to path through a .part file so an interrupted download never leaves a broken model."""
     if not os.path.exists(path):
-        urllib.request.urlretrieve(url, path + ".part")
+        with urllib.request.urlopen(url, context=ssl_context(), timeout=60) as response, open(path + ".part", "wb") as f:
+            shutil.copyfileobj(response, f)
         os.replace(path + ".part", path)
 
 
@@ -892,6 +899,10 @@ def store_preview(cv2, frame):
         preview["png"] = base64.b64encode(png.tobytes()).decode()
 
 
+CAMERA_DENIED_HINT = ("camera not available: allow camera access for your terminal/Python in "
+                      "System Settings > Privacy & Security > Camera")
+
+
 def camera_loop(camera_index):
     try:
         import cv2
@@ -905,8 +916,7 @@ def camera_loop(camera_index):
     if not os.path.exists(MODEL_PATH):
         set_camera(status="downloading face model...")
         try:
-            urllib.request.urlretrieve(MODEL_URL, MODEL_PATH + ".part")
-            os.replace(MODEL_PATH + ".part", MODEL_PATH)
+            download(MODEL_URL, MODEL_PATH)
         except Exception as e:
             set_camera(status=f"model download failed: {e}")
             return
@@ -922,9 +932,9 @@ def camera_loop(camera_index):
     phone_box = None
     frame_number = 0
 
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        set_camera(status="camera not available")
+    cap = open_camera(cv2, camera_index)
+    if cap is None:
+        set_camera(status=CAMERA_DENIED_HINT if sys.platform == "darwin" else "camera not available")
         return
 
     votes = collections.deque(maxlen=SMOOTHING_FRAMES)
@@ -971,16 +981,20 @@ def camera_loop(camera_index):
 
 # ---------------- optional global hotkeys ----------------
 def start_global_hotkeys():
+    """Needs pynput; macOS also needs Accessibility permission and Linux an X11 session. Any failure just means no hotkeys."""
     try:
         from pynput import keyboard
+        hotkeys = keyboard.GlobalHotKeys({
+            "<ctrl>+<shift>+d": lambda: demo_requests.append("d"),
+            "<ctrl>+<shift>+b": lambda: demo_requests.append("b"),
+        })
+        hotkeys.daemon = True
+        hotkeys.start()
     except ImportError:
         return False
-    hotkeys = keyboard.GlobalHotKeys({
-        "<ctrl>+<shift>+d": lambda: demo_requests.append("d"),
-        "<ctrl>+<shift>+b": lambda: demo_requests.append("b"),
-    })
-    hotkeys.daemon = True
-    hotkeys.start()
+    except Exception as e:   # no display server, missing permission, backend import errors
+        print(f"Global hotkeys unavailable: {e}")
+        return False
     return True
 
 
@@ -995,21 +1009,36 @@ def fmt_clock(seconds):
 
 
 def run_ui(fake_camera, global_keys, compact):
-    global running, show_preview
+    global running, show_preview, UI_FONT, MONO_FONT
     import tkinter as tk
+    import tkinter.font as tkfont
+    from tkinter import messagebox
 
     BG, PANEL, FG, MUTED = "#15171a", "#1f2226", "#f2f2f2", "#9aa0a6"
     show_preview = not compact
 
+    if sys.platform == "win32":   # crisp text instead of bitmap-scaled blur on HiDPI screens
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     root = tk.Tk()
+    UI_FONT, MONO_FONT = pick_fonts(
+        sys.platform, set(tkfont.families(root)),
+        tkfont.nametofont("TkDefaultFont").actual("family"), tkfont.nametofont("TkFixedFont").actual("family"))
     root.title("Study Focus")
     root.attributes("-topmost", True)
     root.geometry("+20+20")
     root.configure(bg=BG)
 
     # --- top status bar (always visible) ---
-    bar = tk.Label(root, font=("DejaVu Sans Mono", 12, "bold"), fg="white", padx=12, pady=6, anchor="w")
-    stats = tk.Label(root, font=("DejaVu Sans Mono", 10), fg="white", padx=12, pady=2, anchor="w")
+    bar = tk.Label(root, font=(MONO_FONT, 12, "bold"), fg="white", padx=12, pady=6, anchor="w")
+    stats = tk.Label(root, font=(MONO_FONT, 10), fg="white", padx=12, pady=2, anchor="w")
     bar.pack(fill="x")
     stats.pack(fill="x")
 
@@ -1024,7 +1053,7 @@ def run_ui(fake_camera, global_keys, compact):
 
     expr_frame = tk.Frame(left, bg=PANEL, padx=12, pady=8)
     expr_frame.pack(fill="x", pady=(8, 0))
-    expr_title = tk.Label(expr_frame, font=("DejaVu Sans", 13, "bold"), bg=PANEL, fg=FG, anchor="w")
+    expr_title = tk.Label(expr_frame, font=(UI_FONT, 13, "bold"), bg=PANEL, fg=FG, anchor="w")
     expr_title.pack(fill="x")
     expr_canvas = tk.Canvas(expr_frame, width=PREVIEW_WIDTH - 24, height=len(EXPRESSION_NAMES) * 18,
                             bg=PANEL, highlightthickness=0)
@@ -1033,9 +1062,9 @@ def run_ui(fake_camera, global_keys, compact):
     info = tk.Frame(body, bg=PANEL, padx=14, pady=10)
     info.grid(row=0, column=1, padx=(6, 10), pady=10, sticky="nsew")
 
-    state_big = tk.Label(info, font=("DejaVu Sans", 22, "bold"), bg=PANEL, fg=FG, anchor="w")
+    state_big = tk.Label(info, font=(UI_FONT, 22, "bold"), bg=PANEL, fg=FG, anchor="w")
     state_big.pack(fill="x")
-    reason = tk.Label(info, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED, anchor="w",
+    reason = tk.Label(info, font=(UI_FONT, 10), bg=PANEL, fg=MUTED, anchor="w",
                       justify="left", wraplength=340)
     reason.pack(fill="x", pady=(0, 8))
 
@@ -1046,20 +1075,57 @@ def run_ui(fake_camera, global_keys, compact):
              "Doom-scroll", "Context", "Extension", "Active time", "Focused", "Distracted", "Nudge",
              "Next break"]
     for i, name in enumerate(names):
-        tk.Label(grid, text=name, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED,
+        tk.Label(grid, text=name, font=(UI_FONT, 10), bg=PANEL, fg=MUTED,
                  anchor="w").grid(row=i, column=0, sticky="w", pady=1)
-        rows[name] = tk.Label(grid, font=("DejaVu Sans Mono", 10), bg=PANEL, fg=FG, anchor="w")
+        rows[name] = tk.Label(grid, font=(MONO_FONT, 10), bg=PANEL, fg=FG, anchor="w")
         rows[name].grid(row=i, column=1, sticky="w", padx=(12, 0), pady=1)
 
-    tk.Label(info, text="Productivity Index (last 10 min)", font=("DejaVu Sans", 10),
+    tk.Label(info, text="Productivity Index (last 10 min)", font=(UI_FONT, 10),
              bg=PANEL, fg=MUTED, anchor="w").pack(fill="x", pady=(10, 2))
     index_canvas = tk.Canvas(info, width=340, height=22, bg="#2b2f34", highlightthickness=0)
     index_canvas.pack(anchor="w")
 
-    tk.Label(info, text=f"State timeline (last {TIMELINE_SECONDS // 60} min)", font=("DejaVu Sans", 10),
+    tk.Label(info, text=f"State timeline (last {TIMELINE_SECONDS // 60} min)", font=(UI_FONT, 10),
              bg=PANEL, fg=MUTED, anchor="w").pack(fill="x", pady=(10, 2))
     timeline_canvas = tk.Canvas(info, width=340, height=18, bg="#2b2f34", highlightthickness=0)
     timeline_canvas.pack(anchor="w")
+
+    # --- study session panel (live view only, so --compact stays compact) ---
+    study_panel = tk.Frame(body, bg=PANEL, padx=14, pady=8)
+    study_panel.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+    subject_var, goal_var = tk.StringVar(), tk.StringVar()
+    work_var, break_var = tk.StringVar(value="25"), tk.StringVar(value="5")
+
+    def field(parent, label, **opts):
+        tk.Label(parent, text=label, font=(UI_FONT, 10), bg=PANEL, fg=MUTED).pack(side="left", padx=(0, 4))
+        w = (tk.Spinbox if "from_" in opts else tk.Entry)(
+            parent, font=(MONO_FONT, 10), bg="#2b2f34", fg=FG, insertbackground=FG,
+            relief="flat", **opts)
+        w.pack(side="left", padx=(0, 10))
+        return w
+
+    setup_row = tk.Frame(study_panel, bg=PANEL)
+    field(setup_row, "Subject", textvariable=subject_var, width=16)
+    field(setup_row, "Goal", textvariable=goal_var, width=26)
+    field(setup_row, "Work min", textvariable=work_var, from_=1, to=120, width=4, buttonbackground=PANEL)
+    field(setup_row, "Break min", textvariable=break_var, from_=1, to=60, width=4, buttonbackground=PANEL)
+    start_button = tk.Button(setup_row, text="Start session", width=14)
+    start_button.pack(side="left")
+
+    run_row = tk.Frame(study_panel, bg=PANEL)
+    run_label = tk.Label(run_row, font=(MONO_FONT, 10), bg=PANEL, fg=FG, anchor="w")
+    run_label.pack(side="left", padx=(0, 14))
+    phase_button = tk.Button(run_row, width=10)
+    phase_button.pack(side="left", padx=(0, 6))
+    stop_button = tk.Button(run_row, text="Stop", width=8)
+    stop_button.pack(side="left")
+
+    profile_row = tk.Frame(study_panel, bg=PANEL)
+    profile_label = tk.Label(profile_row, font=(UI_FONT, 10), bg=PANEL, fg=MUTED, anchor="w")
+    profile_label.pack(side="left")
+    history_button = tk.Button(profile_row, text="History", width=8)
+    history_button.pack(side="right")
+    shown_row = [None]   # which of setup_row / run_row is visible
 
     keys = ("Demo: D distraction · B break · T tired · X stuck · M phone · S doom-scroll"
             "  |  C calibrate · V live view · Q quit")
@@ -1067,7 +1133,7 @@ def run_ui(fake_camera, global_keys, compact):
         keys += " · P presence · F facing"
     if global_keys:
         keys += "  (global: Ctrl+Shift+D/B)"
-    hint = tk.Label(root, text=keys, font=("DejaVu Sans Mono", 8), fg="#dddddd", padx=12, pady=4, anchor="w")
+    hint = tk.Label(root, text=keys, font=(MONO_FONT, 8), fg="#dddddd", padx=12, pady=4, anchor="w")
 
     def layout():
         body.pack_forget()
@@ -1085,8 +1151,8 @@ def run_ui(fake_camera, global_keys, compact):
         win.title("Study Focus")
         win.attributes("-topmost", True)
         win.configure(bg=color)
-        tk.Label(win, text=title, font=("DejaVu Sans", 18, "bold"), bg=color, fg="white").pack(padx=30, pady=(20, 6))
-        tk.Label(win, text=message, font=("DejaVu Sans", 12), bg=color, fg="white", justify="center").pack(padx=30, pady=6)
+        tk.Label(win, text=title, font=(UI_FONT, 18, "bold"), bg=color, fg="white").pack(padx=30, pady=(20, 6))
+        tk.Label(win, text=message, font=(UI_FONT, 12), bg=color, fg="white", justify="center").pack(padx=30, pady=6)
         buttons = tk.Frame(win, bg=color)
         buttons.pack(pady=(10, 20))
         if kind == "nudge":
@@ -1094,7 +1160,7 @@ def run_ui(fake_camera, global_keys, compact):
             tk.Button(buttons, text="5 more minutes", width=14,
                       command=lambda: (snooze(), win.destroy())).pack(side="left", padx=6)
         elif kind == "break":
-            counter = tk.Label(buttons, font=("DejaVu Sans Mono", 22, "bold"), bg=color, fg="white")
+            counter = tk.Label(buttons, font=(MONO_FONT, 22, "bold"), bg=color, fg="white")
             counter.pack()
 
             def countdown(left=EYE_REST_SECONDS):
@@ -1111,23 +1177,145 @@ def run_ui(fake_camera, global_keys, compact):
                       command=lambda: (study.start_break(), win.destroy())).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         elif kind == "stuck":
-            tk.Button(buttons, text="Ask AI helper", width=14,
-                      command=lambda: (webbrowser.open(DASHBOARD_URL + "#help"), win.destroy())
-                      ).pack(side="left", padx=6)
+            tk.Button(buttons, text="Study tips", width=14,
+                      command=lambda: (show_tips(), win.destroy())).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         elif kind in ("tired",):
             tk.Button(buttons, text="Take a break", width=14, command=win.destroy).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         else:
             tk.Button(buttons, text="Got it", width=14, command=win.destroy).pack(side="left", padx=6)
-            tk.Button(buttons, text="Open dashboard", width=14,
-                      command=lambda: (webbrowser.open(DASHBOARD_URL), win.destroy())).pack(side="left", padx=6)
         win.update_idletasks()
         x = (win.winfo_screenwidth() - win.winfo_width()) // 2
         y = (win.winfo_screenheight() - win.winfo_height()) // 3
         win.geometry(f"+{x}+{y}")
         win.lift()
         win.focus_force()
+
+    # --- study windows: report, history, tips ---
+    def new_window(title):
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG)
+        return win
+
+    def draw_report_timeline(canvas, report, width):
+        """Colored state strip for the whole session (same colors as the live strip)."""
+        total = max(1.0, report["duration_min"] * 60)
+        items = report["timeline"]
+        for i, (t, st) in enumerate(items):
+            t_end = items[i + 1][0] if i + 1 < len(items) else total
+            canvas.create_rectangle(int(width * t / total), 0, int(width * t_end / total) + 1, 18,
+                                    fill=STATE_COLORS.get(st, "#4a5568"), width=0)
+
+    def show_report(report):
+        win = new_window("Session report")
+        box = tk.Frame(win, bg=PANEL, padx=18, pady=14)
+        box.pack(padx=10, pady=10)
+
+        def line(text, size=10, color=FG, bold=False, pady=1):
+            tk.Label(box, text=text, font=(UI_FONT, size, "bold" if bold else "normal"), bg=PANEL,
+                     fg=color, anchor="w", justify="left", wraplength=440).pack(fill="x", pady=pady)
+
+        line(f"{report['subject']} · {report['duration_min']} min", 16, bold=True)
+        if report["goal"]:
+            line(report["goal"] + ("  (reached)" if report["goal_done"] else "  (not reached)"), color=MUTED)
+        line(f"Focus {report['focus_pct']}%", 22, bold=True, pady=(8, 2))
+        line(f"Focused {report['focused_min']} min · Distracted {report['distracted_min']} min · "
+             f"Pomodoros {report['pomodoros']} · Avg index {report['avg_index']}")
+        line(f"Nudges {report['nudges']} · Overrides {report['overrides']} · "
+             f"Phone pickups {report['phone_pickups']} · Doom-scroll episodes {report['doom_episodes']}")
+        line(f"Attention span {report['attention_span_min']} min per task · best clean run "
+             f"{report['best_streak_min']} min")
+        if report["top_distractions"]:
+            line("Top distractions: " + ", ".join(f"{d} {m} min" for d, m in report["top_distractions"]))
+        if report["moods"]:
+            line("Mood: " + ", ".join(f"{m} {p}%" for m, p in report["moods"]))
+        blink = f"{report['avg_blink']} / min" if report["avg_blink"] is not None else "n/a"
+        line(f"Blink rate {blink} · Yawns {report['yawns']}")
+        tk.Label(box, text="Timeline", font=(UI_FONT, 10), bg=PANEL, fg=MUTED,
+                 anchor="w").pack(fill="x", pady=(8, 2))
+        canvas = tk.Canvas(box, width=440, height=18, bg="#2b2f34", highlightthickness=0)
+        canvas.pack(anchor="w")
+        draw_report_timeline(canvas, report, 440)
+        line("Tips", 11, bold=True, pady=(10, 2))
+        for tip in report["tips"]:
+            line("• " + tip)
+        xp = f"+{report['xp_earned']} XP"
+        if report["new_badges"]:
+            xp += " · New badges: " + ", ".join(report["new_badges"])
+        line(xp, 12, bold=True, pady=(10, 0))
+        tk.Button(win, text="Close", width=10, command=win.destroy).pack(pady=(0, 10))
+
+    def show_history():
+        win = new_window("Past sessions")
+        past = study.report_list()
+        listbox = tk.Listbox(win, width=64, height=min(15, max(3, len(past))), bg=PANEL, fg=FG,
+                             font=(MONO_FONT, 10), selectbackground="#5b8def",
+                             highlightthickness=0, relief="flat", exportselection=False)
+        listbox.pack(padx=10, pady=10)
+        for r in past:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["started"]))
+            listbox.insert("end", f"{when}  {r['subject'][:20]:<20}  {r['duration_min']:>5} min  "
+                                  f"focus {r['focus_pct']:>3}%  +{r['xp_earned']} XP")
+        if not past:
+            listbox.insert("end", "no sessions yet")
+
+        def open_selected(_event):
+            picked = listbox.curselection()
+            report = study.get_report(past[picked[0]]["id"]) if picked and past else None
+            if report:
+                show_report(report)
+        listbox.bind("<<ListboxSelect>>", open_selected)
+
+    def show_tips():
+        win = new_window("Study tips")
+        tk.Label(win, text="Stuck? Pick a technique", font=(UI_FONT, 12, "bold"), bg=BG,
+                 fg=FG).pack(padx=20, pady=(14, 6))
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(padx=20)
+        text = tk.Label(win, font=(UI_FONT, 11), bg=PANEL, fg=FG, wraplength=340, justify="left",
+                        padx=14, pady=10, text="Try one of the buttons above.")
+        for label, mode in (("Explain simpler", "explain"), ("Easy examples", "example"), ("Quiz me", "quiz")):
+            tk.Button(buttons, text=label, width=14,
+                      command=lambda m=mode: text.config(text=study.study_tip(m)["text"])
+                      ).pack(side="left", padx=4)
+        text.pack(fill="x", padx=20, pady=(10, 6))
+        tk.Button(win, text="Close", width=10, command=win.destroy).pack(pady=(0, 14))
+
+    # --- study session controls ---
+    def whole_minutes(var, default):
+        try:
+            return int(var.get())
+        except ValueError:
+            return default
+
+    def start_study():
+        ok, message = study.start_session(subject_var.get(), goal_var.get(),
+                                          whole_minutes(work_var, 25), whole_minutes(break_var, 5))
+        if not ok:
+            messagebox.showinfo("Study Focus", message, parent=root)
+
+    def stop_study():
+        answer = messagebox.askyesnocancel("Study Focus", "Did you reach your goal?", parent=root)
+        if answer is None:
+            return
+        report = study.stop_session(answer)
+        if report:
+            show_report(report)
+
+    def toggle_phase():
+        sv = study.session_view()
+        if sv and sv["phase"] == "break":
+            study.resume_work()
+        elif sv:
+            study.start_break()
+
+    start_button.config(command=start_study)
+    stop_button.config(command=stop_study)
+    phase_button.config(command=toggle_phase)
+    history_button.config(command=show_history)
 
     # --- keys ---
     def handle_key(k):
@@ -1158,7 +1346,11 @@ def run_ui(fake_camera, global_keys, compact):
         running = False
         root.destroy()
 
-    root.bind("<Key>", lambda e: handle_key(e.keysym.lower()))
+    def on_key(e):
+        if not isinstance(e.widget, (tk.Entry, tk.Spinbox)):   # typing in the session fields is not a hotkey
+            handle_key(e.keysym.lower())
+
+    root.bind("<Key>", on_key)
     root.protocol("WM_DELETE_WINDOW", quit_app)
 
     # --- drawing helpers ---
@@ -1174,7 +1366,7 @@ def run_ui(fake_camera, global_keys, compact):
                 fake = "FACE PRESENT" if camera["present"] else "NO FACE"
                 fake += " + FACING" if camera["facing"] else ""
             cam_label.config(text=f"--no-camera mode\n\n{fake}\n\nP = presence   F = facing",
-                             font=("DejaVu Sans Mono", 12), fg=FG)
+                             font=(MONO_FONT, 12), fg=FG)
         else:
             with lock:
                 cam_label.config(text=camera["status"], fg=MUTED)
@@ -1186,18 +1378,18 @@ def run_ui(fake_camera, global_keys, compact):
         for i, name in enumerate(EXPRESSION_NAMES):
             y = i * 18
             value = max(0.0, min(1.0, scores.get(name, 0.0)))
-            expr_canvas.create_text(0, y + 8, text=name, anchor="w", fill=MUTED, font=("DejaVu Sans", 9))
+            expr_canvas.create_text(0, y + 8, text=name, anchor="w", fill=MUTED, font=(UI_FONT, 9))
             expr_canvas.create_rectangle(100, y + 3, 100 + width, y + 14, fill="#2b2f34", width=0)
             expr_canvas.create_rectangle(100, y + 3, 100 + int(width * value), y + 14, fill="#5b8def", width=0)
             expr_canvas.create_text(104 + width, y + 8, text=f"{value:.2f}", anchor="w", fill=FG,
-                                    font=("DejaVu Sans Mono", 8))
+                                    font=(MONO_FONT, 8))
 
     def draw_index(value):
         index_canvas.delete("all")
         color = "#1f7a4d" if value >= 70 else "#b26a00" if value >= 40 else "#b3261e"
         index_canvas.create_rectangle(0, 0, int(340 * value / 100), 22, fill=color, width=0)
         index_canvas.create_text(8, 11, text=f"{value}", anchor="w", fill="white",
-                                 font=("DejaVu Sans Mono", 10, "bold"))
+                                 font=(MONO_FONT, 10, "bold"))
 
     def draw_timeline():
         timeline_canvas.delete("all")
@@ -1240,7 +1432,7 @@ def run_ui(fake_camera, global_keys, compact):
         state_big.config(text=state, fg=color if state not in ("AFK", "Starting") else FG)
         reason.config(text=explain(state, b["category"]))
         rows["Website"].config(text=b["domain"])
-        rows["Category"].config(text=b["category"])
+        rows["Category"].config(text=category_text(b))
         rows["Attention"].config(text=c["reason"] if live else cam)
         rows["Eyes"].config(text=f"{c['gaze_text']}  (h {c['gaze_h']:.2f}, v {c['gaze_v']:+.2f})" if live else "-")
         rate = blink_rate(now_wall)
@@ -1252,7 +1444,7 @@ def run_ui(fake_camera, global_keys, compact):
             rows["Study"].config(text=f"{sv['subject'][:18]} · {sv['phase']} {left // 60}:{left % 60:02d}"
                                       f" · {sv['pomodoros']} pomodoros")
         else:
-            rows["Study"].config(text="no session (start one in the dashboard)")
+            rows["Study"].config(text="no session (start one below)")
         if c["phone_status"] != "on" and not fake_camera:
             rows["Phone"].config(text=f"detector {c['phone_status']}")
         else:
@@ -1283,6 +1475,28 @@ def run_ui(fake_camera, global_keys, compact):
         draw_expressions(c["expression"], c["scores"])
         draw_index(session["index"])
         draw_timeline()
+        update_study_panel(sv)
+
+    def update_study_panel(sv):
+        """Swap between the start form and the running-session controls; refresh the profile line."""
+        want = run_row if sv else setup_row
+        if shown_row[0] is not want:
+            if shown_row[0]:
+                shown_row[0].pack_forget()
+            profile_row.pack_forget()
+            want.pack(fill="x")
+            profile_row.pack(fill="x", pady=(6, 0))
+            shown_row[0] = want
+        if sv:
+            left = sv["phase_left"]
+            goal = f" · goal: {sv['goal'][:30]}" if sv["goal"] else ""
+            run_label.config(text=f"{sv['subject'][:20]}{goal} · {sv['phase']} {left // 60}:{left % 60:02d}"
+                                  f" · {sv['pomodoros']} pomodoros · +{sv['xp']} XP")
+            phase_button.config(text="Resume" if sv["phase"] == "break" else "Break")
+        p = study.profile_view()
+        badges = ", ".join(b["name"] for b in p["badges"]) or "none yet"
+        profile_label.config(text=f"Level {p['level']} · {p['level_need'] - p['level_xp']} XP to next level · "
+                                  f"streak {p['streak']} day(s) · badges: {badges}")
 
     # --- main loop ---
     last = [time.monotonic()]
@@ -1306,7 +1520,6 @@ def run_ui(fake_camera, global_keys, compact):
             tick(dt)
             while events:
                 kind, message = events.pop(0)
-                publish(kind, message)
                 show_popup(kind, message)
             update_info()
         root.after(UI_REFRESH_MS, loop)
@@ -1324,6 +1537,7 @@ def main():
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
 
+    init_classifier()
     try:
         start_server(args.port)
     except OSError:
