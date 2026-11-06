@@ -135,7 +135,10 @@ lock = threading.Lock()
 running = True
 show_preview = True
 browser = {"domain": "waiting for extension", "category": "neutral", "idle": "active",
-           "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False}
+           "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False,
+           "category_source": "list", "category_confidence": None, "category_pending": False}
+jev = None            # goal-aware classifier (engine/classifier), None if unavailable
+JevSurface = None
 camera = {"status": "starting", "present": False, "facing": False, "reason": "-",
           "yaw": 0.0, "pitch": 0.0, "gaze_h": 0.5, "gaze_v": 0.0, "gaze_text": "-",
           "eyes_closed": False, "closed_since": None, "expression": "-",
@@ -437,6 +440,38 @@ def snooze():
     session["nudged"] = False
 
 
+def init_classifier():
+    """Optional goal-aware classifier. Any failure leaves the extension's list categories in charge."""
+    global jev, JevSurface
+    try:
+        from classifier import Surface, build_default
+        jev, JevSurface = build_default(), Surface
+    except Exception as e:
+        print(f"Goal-aware classifier unavailable ({type(e).__name__}); using the extension's site lists.")
+
+
+def judge(data, domain):
+    """Goal-aware verdict for the active tab, or None to keep the extension's list category.
+    Only during a study session (the goal is the context). Never blocks: Jev answers in the background."""
+    sv = study.session_view()
+    if jev is None or not sv or data.get("category") == "other":
+        return None
+    surface = JevSurface("browser", "Chrome", None, domain, str(data.get("path") or "")[:200] or None,
+                         str(data.get("title") or "")[:200] or None, bool(data.get("incognito")))
+    try:
+        return jev.classify(f"{sv['subject']}: {sv['goal']}", surface)
+    except Exception:
+        return None
+
+
+def category_text(b):
+    """'distraction (Jev 0.97)' / 'productive (list)' for the info panel."""
+    src, conf = b["category_source"], b["category_confidence"]
+    how = {"jev": f"Jev {conf:.2f}" if conf is not None else "Jev", "cache": "Jev, cached",
+           "override": "override", "private": "list, private"}.get(src, "list")
+    return f"{b['category']} ({how}{', Jev pending' if b['category_pending'] else ''})"
+
+
 def snapshot():
     with lock:
         snap = {"state": session["state"], "index": session["index"],
@@ -464,6 +499,8 @@ def api_state():
     live = {
         "state": state, "color": STATE_COLORS.get(state, "#4a5568"), "explain": explain(state, b["category"]),
         "index": session["index"], "domain": b["domain"], "category": b["category"],
+        "category_source": b["category_source"], "category_confidence": b["category_confidence"],
+        "category_pending": b["category_pending"], "jev_online": bool(jev and jev.jev_online),
         "extension_ok": bool(b["updated"]) and now - b["updated"] <= EXTENSION_STALE_SECONDS,
         "camera": cam, "camera_status": c["status"], "attention": c["reason"],
         "calibrating": calib["active"] and c["status"] == "ok",
@@ -569,13 +606,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/activity":
             now = time.time()
+            domain = str(data.get("domain", "-"))[:80]
+            verdict = judge(data, domain)   # outside the lock; never blocks
             with lock:
-                domain = str(data.get("domain", "-"))[:80]
                 if domain != browser["domain"] and browser["updated"]:
                     switch_log.append(now)
                 browser["domain"] = domain
                 if data.get("category") in ("productive", "distraction", "neutral", "other"):
                     browser["category"] = data["category"]
+                # Jev/cache/override replace the list category; local guesses never do (list stays)
+                browser.update(category_source="list", category_confidence=None, category_pending=False)
+                if verdict:
+                    browser["category_pending"] = verdict.pending
+                    if verdict.source == "private":
+                        browser["category_source"] = "private"
+                    elif verdict.category and not verdict.pending and verdict.source in ("jev", "cache", "override"):
+                        browser.update(category=verdict.category, category_source=verdict.source,
+                                       category_confidence=verdict.confidence)
                 if data.get("idle") in ("active", "idle", "locked"):
                     browser["idle"] = data["idle"]
                 for key in ("switches", "scroll_px", "swipes"):
@@ -1240,7 +1287,7 @@ def run_ui(fake_camera, global_keys, compact):
         state_big.config(text=state, fg=color if state not in ("AFK", "Starting") else FG)
         reason.config(text=explain(state, b["category"]))
         rows["Website"].config(text=b["domain"])
-        rows["Category"].config(text=b["category"])
+        rows["Category"].config(text=category_text(b))
         rows["Attention"].config(text=c["reason"] if live else cam)
         rows["Eyes"].config(text=f"{c['gaze_text']}  (h {c['gaze_h']:.2f}, v {c['gaze_v']:+.2f})" if live else "-")
         rate = blink_rate(now_wall)
@@ -1324,6 +1371,7 @@ def main():
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
 
+    init_classifier()
     try:
         start_server(args.port)
     except OSError:
