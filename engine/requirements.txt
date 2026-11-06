@@ -1,0 +1,14 @@
+opencv-python>=4.8
+mediapipe>=0.10.14
+# optional: global hotkeys Ctrl+Shift+D / Ctrl+Shift+B
+# pynput
+# Jev goal-aware classifier + offline fallback (see README). The engine still runs without these.
+typesafe-sdk
+onnxruntime
+tokenizers
+numpy
+huggingface-hub
+# dev: pytest (run `python -m pytest engine/tests -q` from the repo root)
+# pytest
+# CA bundle for model downloads on macOS
+certifi

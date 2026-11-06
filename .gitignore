@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.task
+*.tflite
+data/
+models/
