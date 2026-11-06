@@ -19,6 +19,9 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: engine/requirements.txt
+      - if: matrix.os == 'ubuntu-latest'
+        name: Install Qt system libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libfontconfig1
       - run: python setup.py --no-input --skip-models --skip-extension
       - name: Run tests in the setup venv
         shell: bash
