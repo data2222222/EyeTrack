@@ -140,13 +140,18 @@ async function report(tabSwitched = false) {
     chrome.action.setBadgeBackgroundColor({ color });
     chrome.action.setTitle({ title: `Study Focus: ${status.state} (index ${status.index})` });
 
-    // focus mode: cover distracting sites during the work part of a study session
-    if (tab && status.block && !(await isAllowed(domain))) {
-      chrome.tabs.sendMessage(tab.id, {
-        type: "block", subject: status.subject, goal: status.goal, domain,
-      }).catch(() => {});   // no content script on this page (e.g. opened before install)
+    // focus mode: cover distracting sites during the work part of a study session. Sent on every
+    // report so the screen's clock stays in sync; "unblock" removes it when the block or session ends.
+    if (tab) {
+      const block = status.block && !(await isAllowed(domain));
+      chrome.tabs.sendMessage(tab.id, block ? {
+        type: "block", domain, subject: status.subject, goal: status.goal,
+        left: status.block_left, total: status.block_total, skips: status.skips,
+        source: status.category_source, confidence: status.category_confidence,
+      } : { type: "unblock" }).catch(() => {});   // no content script on this page (e.g. opened before install)
     }
   } catch {
+    if (tab) chrome.tabs.sendMessage(tab.id, { type: "unblock" }).catch(() => {});   // engine gone: fail open
     chrome.action.setBadgeText({ text: "off" });
     chrome.action.setBadgeBackgroundColor({ color: "#777777" });
     chrome.action.setTitle({ title: "Study Focus: engine not running" });
@@ -174,6 +179,8 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type === "activity") {
     scrollLog.push({ t: Date.now(), tabId: sender.tab.id, px: msg.px || 0, swipes: msg.swipes || 0 });
     if (Date.now() - lastReport > 4000) report();
+  } else if (msg.type === "refresh") {
+    report();   // the focus screen's clock ran out: ask the engine whether the block is over
   } else if (msg.type === "leave") {
     // back in history; a tab with no history goes to the new-tab page
     const tabId = sender.tab.id;

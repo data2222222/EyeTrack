@@ -27,11 +27,11 @@ productivity. Read `README.md` for setup, session behavior, and privacy details.
   while `content.js` handles page-side scrolling and focus-mode UI.
 - `engine/tests/`: pytest coverage, including simulated camera and offscreen UI
   tests; `conftest.py` adds `engine/` to the import path.
-- `.github/workflows/ci.yml`: Windows, macOS, and Linux checks on Python 3.11/3.12.
+- `.github/workflows/ci.yml`: Windows, macOS, and Linux checks on Python 3.12.
 
 ## Setup and commands
 
-Use Python 3.10–3.12. Run commands from the repository root unless noted otherwise.
+Use Python 3.10–3.14. Run commands from the repository root unless noted otherwise.
 There is no frontend package manager or JavaScript build step.
 
 ```sh
