@@ -222,3 +222,23 @@ class AttentionFilter:
                 self.reason = reason
                 self.pending = None
         return self.facing, self.reason
+
+
+def attention_bucket(camera, mode, now, on_phone=False, fresh_seconds=1.0):
+    """Where the user's attention appears to be, from one camera snapshot.
+
+    "screen", "paper" (looking down in paper mode), "away", "no_face", "phone" or
+    "unavailable". An estimate, not proof of what the person is doing.
+    """
+    observed = camera.get("observed_at")
+    if camera.get("status") != "ok" or observed is None or now - observed > fresh_seconds:
+        return "unavailable"
+    if on_phone:
+        return "phone"
+    if not camera.get("present"):
+        return "no_face"
+    if camera.get("facing"):
+        return "screen"
+    if mode == "both" and camera.get("looking_down"):
+        return "paper"
+    return "away"

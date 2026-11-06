@@ -339,3 +339,16 @@ def test_camera_recovers_after_a_transient_failed_read(camera_modules, monkeypat
     engine.camera_loop(0)
     assert capture.read.call_count == 2
     assert engine.camera["status"] == "stopped"
+
+
+def test_attention_bucket_states():
+    base = {"status": "ok", "observed_at": 10.0, "present": True, "facing": True, "looking_down": False}
+    assert tracking.attention_bucket(base, "pc", 10.5) == "screen"
+    assert tracking.attention_bucket(base, "pc", 12.0) == "unavailable"       # stale observation
+    assert tracking.attention_bucket({**base, "status": "starting"}, "pc", 10.5) == "unavailable"
+    assert tracking.attention_bucket(base, "pc", 10.5, on_phone=True) == "phone"
+    assert tracking.attention_bucket({**base, "present": False}, "pc", 10.5) == "no_face"
+    looking_down = {**base, "facing": False, "looking_down": True}
+    assert tracking.attention_bucket(looking_down, "pc", 10.5) == "away"
+    assert tracking.attention_bucket(looking_down, "both", 10.5) == "paper"
+    assert tracking.attention_bucket({**base, "facing": False}, "both", 10.5) == "away"

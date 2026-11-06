@@ -1,11 +1,11 @@
 # EyeTrack — desktop focus sessions
 
-A clean desktop flow for one focus block: choose computer, notebook or both; optionally enter a goal; work with a timer and optional local camera; then review actual session time. The Chrome extension supplies website activity to the desktop app. Camera observations are estimates, not proof of attention or productivity.
+A calm desktop flow for one focus block: optionally enter a goal, start a 25-minute session (5-minute break), watch a live camera view with a focus score, and review where your attention went. The Chrome extension supplies website activity to the desktop app. Camera observations are estimates, not proof of attention or productivity.
 
 Two parts:
 - `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session.
 - `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.
-- `engine/desktop.py`: PySide6 setup, active-session and summary screens.
+- `engine/desktop.py`: PySide6 setup, live dashboard and summary screens; `engine/widgets.py`: its painted widgets (camera view, timer ring, trend, split bar).
 - `engine/study.py`: timestamp-based session clock, pauses, actual breaks and session summaries.
 
 ## Quick start
@@ -42,19 +42,21 @@ Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 an
 - **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.
 - **Linux**: camera via V4L2 (`/dev/video0`, with camera access for your desktop user). If Qt reports a missing XCB cursor library, install `libxcb-cursor0` using your distribution package manager. The desktop interface no longer requires Tk.
 
-The session UI uses visible controls. Technical camera measurements and a UI-only check-in preview are behind **Diagnostics**.
+Technical camera measurements and a UI-only check-in preview are behind the ⋯ menu.
 
 ## Desktop session flow
 
-1. **Set up:** choose Computer / Notebook / Computer & notebook, enter an optional goal, choose 15 / 25 / 45 minutes, and choose whether to use the camera. The mode is saved with the session; notebook-specific calibration is a separate work item.
-2. **Work:** a large remaining-time clock, camera/browser status and **Pause / Resume**, **Take a break**, **End session** controls. Camera preview is collapsible; measurements stay in Diagnostics.
-3. **Review:** actual active time, paused time, actual break duration/count, check-ins shown, separate website/camera observations and optional goal-completion self-report. **Start another session** returns to setup.
+1. **Set up:** an optional goal, plus two small dropdowns: *Working with* (**Computer only** or **Computer + paper**) and *Rhythm* (**25 min focus · 5 min break** by default; also 50/10 and 15/3). The camera is on by default and can be switched off. In *Computer + paper* mode, looking down toward the desk counts as on task.
+2. **Work:** the camera preview is shown by default (a **Hide** button on it hides the picture while tracking continues), with a live state chip (**On screen**, **On paper**, **Looking away**, **Out of view**, **On phone**) and how long it has lasted. Beside it, a countdown ring with **Pause / Resume**, **Take a break** and **End**, and a live **Focus score** with a trend line, look-away and phone counts and the current site. A bar shows where your attention went this session. The ⋯ menu holds screen calibration, tracking details and Chrome setup.
+3. **Review:** the final focus score and trend, active/break/paused time, look-aways, phone pickups, where your attention and time went, and an optional goal-completion self-report. **New session** returns to setup.
+
+**Focus score (0 to 100):** the share of tracked time spent on task. On task means the camera sees you looking at the screen (or at paper, in *Computer + paper* mode) and you are not on a distracting site. Looking away, being out of view, a phone in view, or a distracting site all count as off task. Time without a fresh camera observation is not scored, and the live number covers the last 5 minutes of active time and appears after about 5 tracked seconds. Without a camera, the score comes from Chrome sites only. A look-away is counted when you look away for 3 seconds or more. It is an estimate from a webcam, not a measure of productivity.
 
 Only an explicit pause or break stops active time. Camera absence and AFK do not pause it. Resuming preserves the remaining work block. Five-minute breaks can end early or stay open longer; they never auto-resume. A completed block stops at its planned duration instead of automatically starting another block.
 
 The camera starts only for camera-enabled work and is stopped/joined on pause, break, completion, end and app close. The real camera and both detector resources are released before shutdown. Calibration/tracking remains in `tracking.py` and is being developed separately.
 
-Reports are saved locally in `engine/data/sessions.json`; older reports are preserved. The UI does not show productivity scores, mood, XP or streaks. Website and camera categories each describe active time independently. Missing/stale camera observations are unavailable after one second. Browser observation freshness still follows the existing collector's heartbeat; improving event-boundary accounting is a remaining browser task.
+Reports are saved locally in `engine/data/sessions.json`; older reports are preserved. The UI shows the focus score described above, but no mood, XP or streaks. Website and camera categories each describe active time independently. Missing/stale camera observations are unavailable after one second. Browser observation freshness still follows the existing collector's heartbeat; improving event-boundary accounting is a remaining browser task.
 
 The extension's existing focus overlay is an intervention, not navigation blocking. User domain settings, return-to-work behavior and overlay cleanup remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
 
@@ -80,10 +82,10 @@ python -m classifier.spike                  # optional: try 5 sample pages again
 
 ## Observation signals
 
-Camera and website observations are kept separate in the summary. A visible phone is not proof of phone use; an off-camera phone is unobserved. The camera-derived legacy state does not control the session timer. Expression/fatigue heuristics and the old fake-time keyboard demos are not part of the new session interface. **Diagnostics → Preview check-in** previews UI without incrementing tracked nudges.
+Camera and website observations are kept separate in the summary. A visible phone is not proof of phone use; an off-camera phone is unobserved. The camera-derived legacy state does not control the session timer. Expression/fatigue heuristics and the old fake-time keyboard demos are not part of the new session interface. **⋯ → Preview a check-in** previews UI without incrementing tracked nudges.
 
 ## Accuracy tips
-During a session with the camera enabled, choose **Calibrate screen** in the camera panel or **Diagnostics**. Follow the five dots with your eyes, keeping your usual sitting position; the ring fills while tracking is stable. Repeat this after moving your camera, chair, or screen. **Esc** cancels and keeps the last completed calibration. If eye movement is unclear, calibration shows a warning and keeps the previous profile (or a center-only fallback on the first run). Without guided calibration, look at screen center and hold still for about three seconds for the automatic center calibration. Calibration is kept for the current run.
+During a session with the camera enabled, choose **Calibrate screen…** in the ⋯ menu. Follow the five dots with your eyes, keeping your usual sitting position; the ring fills while tracking is stable. Repeat this after moving your camera, chair, or screen. **Esc** cancels and keeps the last completed calibration. If eye movement is unclear, calibration shows a warning and keeps the previous profile (or a center-only fallback on the first run). Without guided calibration, look at screen center and hold still for about three seconds for the automatic center calibration. Calibration is kept for the current run.
 
 Use even light on your face and avoid a bright window behind you. Brief blinks are ignored for attention; prolonged eye closure still registers. Head tilt and sitting off-center no longer count as looking away by themselves. Tiny, clipped, or unreliable eye landmarks show a tracking hint and are excluded from calibration. This is a webcam estimate of attention, not a precise screen-coordinate eye tracker. Calibration defaults are in `engine/tracking.py`; other thresholds such as `DOOM_SCROLL_PX` and `PHONE_SCORE` remain at the top of `engine.py`.
 
