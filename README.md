@@ -3,7 +3,7 @@
 Study Focus watches *how* you study (browser activity plus your webcam, processed only on your laptop) and helps you stay focused: Pomodoro sessions, distraction and doom-scroll detection, phone detection, tiredness and frustration alerts, an AI tutor, session reports, XP and streaks.
 
 Three parts:
-- `extension/`: Chrome extension. Sends the active **domain** (never the full URL), scrolling amount, idle state and tab switches to the engine. Shows the focus-mode screen on distracting sites during a study session. Clicking the icon opens the dashboard.
+- `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session. Clicking the icon opens the dashboard.
 - `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window and the local server on `127.0.0.1:8000`.
 - `engine/study.py` + `engine/dashboard.html`: study sessions, XP, reports, AI helper, and the web dashboard at **http://127.0.0.1:8000**.
 
@@ -44,6 +44,26 @@ or create `engine/data/config.json`: `{"anthropic_api_key": "sk-ant-..."}`. With
 
 **Reports, XP, streaks**: at the end of a session you get a report: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
 
+## Goal-aware classification (Jev)
+
+During a study session, the site lists in the extension are only a fallback. Each tab is also judged against your session (`subject: goal`) by Jev (TypeSafe), so a physics lecture on youtube.com can count as *productive* and funny cats as *distraction*. The decision matrix below is unchanged; only the category it receives gets smarter. Outside a study session nothing is sent and the extension's lists apply as before.
+
+**Setup**
+```bash
+pip install -r requirements.txt
+export TYPESAFE_API_KEY=...                 # or {"typesafe_api_key": "..."} in engine/data/config.json
+python -m classifier.fetch_model            # optional offline model (~90 MB) into engine/models/
+python -m classifier.spike                  # optional: try 5 sample pages against Jev
+```
+
+**What is sent to Jev**: your goal (subject + goal text), the domain, the URL path without query or fragment, and the page title (plus the browser name, "Chrome"). Never camera frames. Never incognito tabs, password managers, banking sites or anything on your own never-send list (`"classifier": {"never_send": {"domains": [...], "apps": [...]}}` in `config.json`): those are not sent, not even to the local model.
+
+**How it behaves**: one question per page ("productive, neutral or distraction?"). Answers are cached in `engine/data/classifications.json` for 7 days, per site + page title + goal. At most 5 requests per domain per hour; after that the latest answer for that domain is reused. Answers with confidence below 0.5 are discarded. Requests run in the background, so a new page keeps its list category until Jev answers (a few seconds, shown as "Jev pending").
+
+**Where you see it**: the *Category* row shows the verdict and its source, e.g. `distraction (Jev 0.97)`, `productive (Jev, cached)`, `productive (list)`. `GET /api/state` has `category_source` (`jev`, `cache`, `override`, `private`, `list`), `category_confidence`, `category_pending` and `jev_online`.
+
+**Fallbacks**: no key, no `typesafe-sdk` or no network → the extension's lists are used (the engine never needs Jev to run). A small local model (MiniLM, `engine/models/`) scores similarity to your goal as a second opinion; its guesses are never strong enough to override the lists today. If the classifier cannot be imported the engine prints one line and behaves exactly as before.
+
 ## Decision matrix
 
 | Browser / camera | State | Action |
@@ -67,4 +87,4 @@ D distraction · S doom-scroll · M phone · T tired · X stuck · B eye break �
 Look at the middle of the screen and press **C** (2 s). Light on your face, no bright window behind you. Thresholds are at the top of `engine.py` (`YAW_TOLERANCE`, `GAZE_H_TOLERANCE`, `DOOM_SCROLL_PX`, `PHONE_SCORE`, …). For a live demo, `NUDGE_AFTER_SECONDS = 15` and `DOOM_AFTER_SECONDS = 20` make alerts fire faster.
 
 ## Privacy
-Camera frames stay in memory and are never saved or uploaded. The extension sends domains and scroll counts only to `127.0.0.1`. The local server refuses requests from other websites. Only the AI helper sends text (your question + subject) to the AI provider, and only when you click it.
+Camera frames stay in memory and are never saved or uploaded. The extension sends the domain, the URL path (no query string or fragment), the page title and scroll counts to `127.0.0.1` only; incognito tabs send the domain only. The local server refuses requests from other websites. Text leaves your laptop in two cases: the AI helper sends your question + subject to the AI provider when you click it, and, **during a study session with a Jev key configured**, your goal, the domain, URL path and page title of the active tab are sent to the Jev API to classify it (see *Goal-aware classification*). Without a key, nothing about your pages leaves the machine.
