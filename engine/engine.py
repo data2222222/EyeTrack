@@ -33,6 +33,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import phone_detection
 import study
 import tracking
 
@@ -73,8 +74,8 @@ DOOM_AFTER_SECONDS = 60          # sustained this long -> "Doom-scrolling"
 PHONE_AFTER_SECONDS = 3          # phone visible this long -> "On Phone"
 PHONE_NUDGE_SECONDS = 20
 PHONE_COOLDOWN = 5 * 60
-PHONE_SCORE = 0.35               # object detector confidence
-PHONE_EVERY_N_FRAMES = 3         # run the phone detector on every 3rd frame (saves CPU)
+PHONE_SCORE = phone_detection.RAW_SCORE_THRESHOLD    # lenient raw threshold; PhoneTracker filters
+PHONE_EVERY_N_FRAMES = phone_detection.DETECT_EVERY_N_FRAMES  # detector cadence (CPU vs. latency)
 CONTEXT_WINDOW = 30 * 60         # context-switch stats over the last 30 minutes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -146,9 +147,10 @@ jev = None            # goal-aware classifier (engine/classifier), None if unava
 JevSurface = None
 camera = {"status": "starting", "present": False, "facing": False, "reason": "-",
           "yaw": 0.0, "pitch": 0.0, "gaze_h": 0.5, "gaze_v": 0.0, "gaze_text": "-",
-          "eyes_closed": False, "closed_since": None, "expression": "-",
+          "eyes_closed": False, "closed_since": None, "expression": "-", "looking_down": False,
           "scores": {n: 0.0 for n in EXPRESSION_NAMES},
-          "phone": False, "phone_since": None, "phone_status": "starting", "yawns_total": 0,
+          "phone": False, "phone_since": None, "phone_status": "starting", "phone_confidence": 0.0,
+          "yawns_total": 0,
           "last_seen": time.time(), "started": time.time()}
 calib = tracking.Calibration()
 blinks = collections.deque()          # timestamps
@@ -311,7 +313,8 @@ def tick(dt):
             "blink_rate": blink_rate(now), "yawns_total": c["yawns_total"],
             "browser_age": max(0, now - b["updated"]) if b["updated"] else None,
             "camera_category": ("present" if c["present"] else "no_face") if c["status"] == "ok" else "unavailable",
-            "camera_observed_at": c.get("observed_at")}):
+            "camera_observed_at": c.get("observed_at"),
+            "attention": tracking.attention_bucket(c, sv["mode"] if sv else "pc", time.monotonic(), on_phone)}):
         emit(kind, message)
 
     sv = study.session_view()
@@ -662,6 +665,12 @@ def gaze_direction(gaze_h, gaze_v):
     return "-".join(parts) if parts else "center"
 
 
+def head_or_eyes_down(pitch, gaze_h, gaze_v):
+    """Head tipped or eyes lowered past the calibrated screen area (reading paper, a desk, a lap)."""
+    _, bounds = calib.profile()
+    return pitch > bounds[1][1] or "down" in gaze_direction(gaze_h, gaze_v)
+
+
 def attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed):
     """Is the user looking at the screen? Returns (bool, reason)."""
     if eyes_closed:
@@ -756,7 +765,8 @@ def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
                       gaze_h=gaze_h, gaze_v=gaze_v,
                       gaze_text="uncertain" if quality else ("closed" if eyes_closed else gaze_direction(gaze_h, gaze_v)),
                       eyes_closed=eyes_closed, closed_since=st["closed_since"],
-                      expression=expression, scores=scores, last_seen=now)
+                      expression=expression, scores=scores, last_seen=now,
+                      looking_down=not quality and not eyes_closed and head_or_eyes_down(pitch, gaze_h, gaze_v))
     return facing, reason
 
 
@@ -767,7 +777,7 @@ def clear_face_tracking(st, expression_votes, reason="no face"):
     st.update(closed_since=None, jaw_since=None)
     calib.interrupt("Move into view and look at the target")
     set_camera(present=False, facing=False, reason=reason, closed_since=None,
-               eyes_closed=False, gaze_text="-", expression="-",
+               eyes_closed=False, looking_down=False, gaze_text="-", expression="-",
                scores={n: 0.0 for n in EXPRESSION_NAMES})
 
 
@@ -825,7 +835,7 @@ def make_phone_detector(vision, mp_python):
         options = vision.ObjectDetectorOptions(
             base_options=mp_python.BaseOptions(model_asset_path=PHONE_MODEL_PATH),
             running_mode=vision.RunningMode.VIDEO,
-            max_results=2, score_threshold=PHONE_SCORE,
+            max_results=3, score_threshold=PHONE_SCORE,
             category_allowlist=["cell phone"])
         detector = vision.ObjectDetector.create_from_options(options)
         set_camera(phone_status="on")
@@ -835,31 +845,37 @@ def make_phone_detector(vision, mp_python):
         return None
 
 
-def detect_phone(detector, image, phone_votes):
-    """Returns the phone box (x, y, w, h) in pixels or None, and updates the shared state."""
-    result = detector.detect_for_video(image, int(time.monotonic() * 1000))
-    box = None
-    if result.detections:
-        b = result.detections[0].bounding_box
-        box = (b.origin_x, b.origin_y, b.width, b.height)
-    phone_votes.append(box is not None)
-    seen = sum(phone_votes) >= 2
+def detect_phone(detector, image, tracker, frame_size, context=None):
+    """Run the detector, feed the PhoneTracker, update shared state; returns the PhoneState.
+
+    frame_size is (width, height) in pixels; context is an optional phone_detection.FaceContext.
+    """
+    now = time.monotonic()
+    result = detector.detect_for_video(image, int(now * 1000))
+    detections = []
+    for d in result.detections or ():
+        b = d.bounding_box
+        detections.append(((b.origin_x, b.origin_y, b.width, b.height), d.categories[0].score))
+    state = tracker.update(detections, frame_size, now, context)
     with lock:
-        if seen and camera["phone_since"] is None:
-            camera["phone_since"] = time.time()
-        elif not seen:
+        if state.seen and camera["phone_since"] is None:
+            # tracker timestamps are monotonic; backdate to when the evidence started
+            camera["phone_since"] = time.time() - max(0.0, now - (state.since or now))
+        elif not state.seen:
             camera["phone_since"] = None
-        camera["phone"] = seen
-    return box
+        camera["phone"] = state.seen
+        camera["phone_confidence"] = state.confidence if state.seen else 0.0
+    return state
 
 
-def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None):
-    """Draw face points, eyes, gaze arrow, phone box and verdict (in memory only)."""
+def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None, phone_confidence=None):
+    """Draw face points, eyes, gaze arrow and phone box (in memory only)."""
     h, w = frame.shape[:2]
     if phone_box:
-        x, y, bw, bh = phone_box
+        x, y, bw, bh = (int(v) for v in phone_box)
         cv2.rectangle(frame, (x, y), (x + bw, y + bh), (160, 30, 220), 3)
-        cv2.putText(frame, "PHONE", (x, max(70, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+        label = "PHONE" if phone_confidence is None else f"PHONE {phone_confidence:.0%}"
+        cv2.putText(frame, label, (x, max(70, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (160, 30, 220), 2, cv2.LINE_AA)
 
     def px(i):
@@ -881,31 +897,13 @@ def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None):
         # gaze arrow from between the eyes
         with lock:
             gh, gv, closed = camera["gaze_h"], camera["gaze_v"], camera["eyes_closed"]
-            expression, scores = camera["expression"], dict(camera["scores"])
         if not closed:
             center, _ = calib.profile()
             base_h, base_v = center[2:]
             sx, sy = px(168)
             end = (int(sx + (gh - base_h) * 600), int(sy + (gv - base_v) * 120))
             cv2.arrowedLine(frame, (sx, sy), end, (255, 220, 0), 2, tipLength=0.3)
-        label = "LOOKING AT SCREEN" if facing else "NOT LOOKING"
-        detail = reason
-        calibration = calib.view()
-        if calibration["active"]:
-            label = "CALIBRATING"
-            detail = f"{calibration['message']} ({int(calibration['progress'] * 100)}%)"
-        cv2.rectangle(frame, (0, h - 34), (w, h), (25, 25, 25), -1)
-        cv2.putText(frame, f"Expression: {expression}   (smile {scores['Smile']:.2f}, "
-                           f"brow down {scores['Brow down']:.2f})",
-                    (12, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
-    else:
-        color = (60, 60, 220)
-        label = "NO FACE"
-        detail = "move into the frame"
-
-    cv2.rectangle(frame, (0, 0), (w, 54), (25, 25, 25), -1)
-    cv2.putText(frame, label, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
-    cv2.putText(frame, detail, (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
+    # The desktop window draws the verdict itself; keep the frame clean.
     return frame
 
 
@@ -913,9 +911,9 @@ def store_preview(cv2, frame):
     import base64
     h, w = frame.shape[:2]
     small = cv2.resize(frame, (PREVIEW_WIDTH, int(h * PREVIEW_WIDTH / w)))
-    ok, png = cv2.imencode(".png", small)
+    ok, jpg = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
     if ok:
-        preview["png"] = base64.b64encode(png.tobytes()).decode()
+        preview["png"] = base64.b64encode(jpg.tobytes()).decode()   # key kept for callers; JPEG is far cheaper to encode
 
 
 CAMERA_DENIED_HINT = ("camera not available: allow camera access for your terminal/Python in "
@@ -952,8 +950,8 @@ def camera_loop(camera_index, stop_event=None):
             phone_detector = make_phone_detector(vision, mp_python)
             if phone_detector is not None:
                 resources.callback(phone_detector.close)
-            phone_votes = collections.deque(maxlen=4)
-            phone_box = None
+            phone_tracker = phone_detection.PhoneTracker()
+            phone_state = phone_detection.PhoneState()
             frame_number = 0
 
             cap = open_camera(cv2, camera_index)
@@ -973,10 +971,10 @@ def camera_loop(camera_index, stop_event=None):
                 ok, frame = cap.read()
                 if not ok:
                     clear_face_tracking(st, expression_votes, "camera frame unavailable")
-                    phone_votes.clear()
-                    phone_box = None
+                    phone_tracker.reset()
+                    phone_state = phone_detection.PhoneState()
                     set_camera(status="camera interrupted; retrying...", phone=False, phone_since=None,
-                               observed_at=None)
+                               phone_confidence=0.0, observed_at=None)
                     preview["png"] = None
                     if time.monotonic() - last_frame >= CAMERA_READ_TIMEOUT:
                         raise RuntimeError("camera stopped delivering frames; reconnect it and restart")
@@ -1006,17 +1004,22 @@ def camera_loop(camera_index, stop_event=None):
                 frame_number += 1
                 if phone_detector and frame_number % PHONE_EVERY_N_FRAMES == 0:
                     try:
-                        phone_box = detect_phone(phone_detector, image, phone_votes)
+                        frame_size = (frame.shape[1], frame.shape[0])
+                        phone_state = detect_phone(
+                            phone_detector, image, phone_tracker, frame_size,
+                            phone_detection.face_context_from_landmarks(
+                                lm, frame_size, camera["pitch"], calib.profile()[0][1]))
                     except Exception as exc:
                         # Phone detection is optional; it must not take face tracking down.
                         phone_detector = None
-                        phone_box = None
-                        phone_votes.clear()
-                        set_camera(phone=False, phone_since=None,
+                        phone_tracker.reset()
+                        phone_state = phone_detection.PhoneState()
+                        set_camera(phone=False, phone_since=None, phone_confidence=0.0,
                                    phone_status=f"off (detector error: {str(exc)[:60]})")
 
                 if show_preview:
-                    store_preview(cv2, draw_overlay(cv2, frame, lm, facing, reason, phone_box))
+                    store_preview(cv2, draw_overlay(cv2, frame, lm, facing, reason, phone_state.box,
+                                                phone_state.confidence))
 
                 time.sleep(max(0.0, frame_time - (time.monotonic() - started)))
         set_camera(status="stopped")
@@ -1024,7 +1027,7 @@ def camera_loop(camera_index, stop_event=None):
         set_camera(status=f"camera error ({type(exc).__name__}): {str(exc)[:100]}")
     finally:
         set_camera(present=False, facing=False, phone=False, phone_since=None,
-                   phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
+                   phone_confidence=0.0, phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
                    expression="-", scores={n: 0.0 for n in EXPRESSION_NAMES}, observed_at=None)
         calib.interrupt("Camera stopped; look at screen center when it resumes")
         preview["png"] = None
@@ -1673,7 +1676,8 @@ class CameraController:
         self.stop_event = threading.Event()
         self.enabled = False
         set_camera(status="off", present=False, facing=False, phone=False,
-                   phone_since=None, observed_at=None, phone_status="off")
+                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   phone_status="off")
 
     def start(self):
         if self.enabled:
@@ -1681,7 +1685,8 @@ class CameraController:
         self.stop_event.clear()
         self.enabled = True
         set_camera(status="starting", present=False, facing=False, phone=False,
-                   phone_since=None, observed_at=None, last_seen=time.time())
+                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   last_seen=time.time())
         if self.simulated:
             set_camera(status="ok", present=True, facing=True, reason="simulated",
                        observed_at=time.monotonic())
@@ -1702,7 +1707,8 @@ class CameraController:
             self.worker.join()
             self.worker = None
         set_camera(status="off", present=False, facing=False, phone=False,
-                   phone_since=None, observed_at=None, phone_status="off")
+                   phone_since=None, phone_confidence=0.0, observed_at=None,
+                   phone_status="off")
         preview["png"] = None
 
 

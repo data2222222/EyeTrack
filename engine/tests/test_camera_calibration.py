@@ -87,7 +87,7 @@ def test_desktop_calibration_control_starts_guided_calibration(app, monkeypatch)
                               camera={"status": "ok"})
     window = FocusWindow(runtime, start_timer=False)
     try:
-        window.calibrate_button.click()
+        window.calibrate_action.trigger()
         assert calibration.view()["guided"]
         assert camera_calibration._dialog is not None
         camera_calibration._dialog.reject()

@@ -152,3 +152,82 @@ def test_clock_ignores_wall_clock_changes(clock, monkeypatch):
     monkeypatch.setattr(study.time, "time", lambda: -9999)
     clock[0] += 60
     assert study.session_view()["phase_left"] == 1440
+
+
+def observe(clock, seconds, attention, website="work", camera_enabled=True):
+    """Advance the fake clock one second at a time, refreshing observations each second."""
+    for _ in range(seconds):
+        now = clock[0]
+        study.tick(1, {"category": {"work": "productive", "distraction": "distraction"}[website],
+                       "browser_age": 0, "attention": attention, "camera_observed_at": now,
+                       "camera_category": "present"})
+        clock[0] += 1
+    study.session_view()
+
+
+def test_focus_score_counts_screen_and_paper_but_not_away_or_phone(clock):
+    start(mode="both")
+    observe(clock, 30, "screen")
+    observe(clock, 10, "paper")
+    observe(clock, 10, "away")
+    observe(clock, 10, "phone")
+    view = study.session_view()
+    assert view["score"] == 67          # 40 of 60 tracked seconds on task
+    assert view["focus"]["paper"] == pytest.approx(10, abs=1.1)
+    assert view["now"] == "phone"
+
+
+def test_distracting_site_cancels_on_screen_credit(clock):
+    start()
+    observe(clock, 20, "screen", website="distraction")
+    observe(clock, 20, "screen", website="work")
+    assert study.session_view()["score"] == 50
+
+
+def test_score_waits_for_enough_tracked_time_and_ignores_stale_camera(clock):
+    start()
+    observe(clock, 3, "screen")
+    assert study.session_view()["score"] is None
+    clock[0] += 120                     # camera stopped reporting: gap is not scored
+    view = study.session_view()
+    assert view["score"] is None
+    assert view["focus"]["unavailable"] >= 119
+
+
+def test_camera_off_sessions_score_from_sites(clock):
+    start(camera_enabled=False)
+    observe(clock, 20, "screen", website="work")
+    observe(clock, 20, "screen", website="distraction")
+    view = study.session_view()
+    assert view["score"] == 50
+    assert view["focus"]["screen"] == 0
+
+
+def test_look_away_counts_after_three_seconds_once_per_episode(clock):
+    start()
+    observe(clock, 2, "away")
+    observe(clock, 5, "screen")
+    assert study.session_view()["look_aways"] == 0
+    observe(clock, 8, "away")
+    assert study.session_view()["look_aways"] == 1
+    observe(clock, 5, "screen")
+    observe(clock, 4, "no_face")
+    assert study.session_view()["look_aways"] == 2
+
+
+def test_rolling_score_window_forgets_old_minutes(clock):
+    start(work_min=60)
+    observe(clock, 120, "away")
+    observe(clock, 330, "screen")
+    view = study.session_view()
+    assert view["score"] == 100
+    assert view["session_score"] < 100
+
+
+def test_report_keeps_score_and_trend(clock):
+    start()
+    observe(clock, 40, "screen")
+    report = study.stop_session()
+    assert report["score"] == 100 and report["look_aways"] == 0
+    assert report["focus"]["screen"] >= 39
+    assert len(report["trace"]) >= 4 and report["trace"][0] == 100
