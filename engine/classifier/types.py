@@ -40,7 +40,6 @@ class Classification:
     source: ClassificationSource | None
     confidence: float | None  # 0..1
     pending: bool  # True while a remote (Jev) answer is outstanding
-    stale: bool = False  # coalesced domain-level answer: reused from another page of the same domain
     remote_unreachable: bool = False  # Jev confirmed down or not configured
     ts: int = 0
 

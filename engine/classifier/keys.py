@@ -39,9 +39,10 @@ def surface_title(surface: Surface) -> str | None:
 
 
 def make_key(goal: str, surface: Surface) -> str:
-    """`kind:bucket|title-hash|goal-hash`. Query/fragment never reach the key (domain and title only)."""
-    title = short_hash(normalize_title(surface_title(surface)))
-    return f"{surface.kind}:{bucket(surface)}|{title}|{goal_hash(goal)}"
+    """`kind:bucket|page-hash|goal-hash`, page = sanitized URL path + title, so two LLM chats or two
+    searches never share a verdict. Query/fragment never reach the key."""
+    page = short_hash(f"{url_path(surface.url)}\n{normalize_title(surface_title(surface))}")
+    return f"{surface.kind}:{bucket(surface)}|{page}|{goal_hash(goal)}"
 
 
 def url_path(url: str | None, depth: int = 3) -> str:
@@ -70,7 +71,8 @@ def state_text(goal: str, surface: Surface) -> str:
             f"URL: {_clip(url_path(surface.url), 120)}",
             f"Page title: {_clip(surface.page_title, 120)}",
         ]
-    lines.append(f"Window title: {_clip(surface.window_title, 120)}")
+    if surface.kind != "browser" or surface.window_title != surface.page_title:
+        lines.append(f"Window title: {_clip(surface.window_title, 120)}")   # same text twice adds nothing
     return "\n".join(lines)[:MAX_STATE_CHARS]
 
 
