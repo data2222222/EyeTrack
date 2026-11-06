@@ -182,6 +182,7 @@ class FocusWindow(QMainWindow):
         self.controller = engine.camera_controller
         self.report = None
         self.checkin_visible = False
+        self.app_alert = None
         self.preview_hidden = False
         self.last_tick = time.monotonic()
         self.last_frame = None
@@ -447,12 +448,15 @@ class FocusWindow(QMainWindow):
         facts = QHBoxLayout()
         self.fact_aways = label("0 look-aways", "muted")
         self.fact_phone = label("0 phone", "muted")
+        self.fact_apps = label("0 app alerts", "muted")
         self.site_label = label("", "muted")
         self.site_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.site_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         facts.addWidget(self.fact_aways)
         facts.addSpacing(12)
         facts.addWidget(self.fact_phone)
+        facts.addSpacing(12)
+        facts.addWidget(self.fact_apps)
         facts.addWidget(self.site_label, 1)
         score_box.addLayout(facts)
         right.addWidget(score, 4)
@@ -538,8 +542,10 @@ class FocusWindow(QMainWindow):
         split.setSpacing(18)
         self.summary_attention = SplitCard("Where your attention went", "camera estimate")
         self.summary_sites = SplitCard("Where your time went", "Chrome")
+        self.summary_apps = SplitCard("Desktop apps", "foreground time")
         split.addWidget(self.summary_attention, 1)
         split.addWidget(self.summary_sites, 1)
+        split.addWidget(self.summary_apps, 1)
         layout.addLayout(split)
 
         result, result_box = card(margins=(22, 14, 22, 14))
@@ -651,6 +657,10 @@ class FocusWindow(QMainWindow):
         self.summary_sites.setVisible(any(site[k] > 0 for k in ("work", "unlisted", "distraction", "outside")))
         self.summary_sites.set_rows([("Work sites", GOOD, site["work"]), ("Other sites", PAPER, site["unlisted"]),
                                      ("Distracting sites", PHONE, site["distraction"]), ("Other apps", IDLE, site["outside"])])
+        apps = report.get("apps") or []
+        self.summary_apps.setVisible(bool(apps))
+        if apps:
+            self.summary_apps.set_rows(self.app_rows(apps, report.get("app_distraction_seconds", 0.0)))
         self.result_group.setExclusive(False)
         for w in self.result_group.buttons():
             w.setChecked(False)
@@ -665,6 +675,13 @@ class FocusWindow(QMainWindow):
             rows.append(("On paper", PAPER, focus.get("paper", 0.0)))
         rows.append(("Looking away", AWAY, focus.get("away", 0.0) + focus.get("no_face", 0.0)))
         rows.append(("On phone", PHONE, focus.get("phone", 0.0)))
+        return rows
+
+    @staticmethod
+    def app_rows(apps, distraction):
+        """Distracting-app time first, then the most-used other apps (names only, no titles)."""
+        rows = [("Distracting apps", PHONE, distraction)]
+        rows += [(app["name"].title(), PAPER, app["seconds"]) for app in apps if not app["distracting"]][:3]
         return rows
 
     def save_result(self, result):
@@ -689,6 +706,29 @@ class FocusWindow(QMainWindow):
     def dismiss_checkin(self):
         self.checkin.hide()
         self.checkin_visible = False
+        if self.app_alert is not None:
+            alert, self.app_alert = self.app_alert, None
+            alert.close()
+
+    def show_app_alert(self, message):
+        """A topmost, non-modal popup so the alert is seen even when another app is in front."""
+        if self.app_alert is not None:
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Distracting app")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.finished.connect(self.forget_app_alert)
+        self.app_alert = dialog
+        dialog.open()
+        QApplication.alert(self)
+
+    def forget_app_alert(self, *_):
+        if self.sender() is self.app_alert:
+            self.app_alert = None
 
     def show_checkin(self, message, preview=False):
         if self.checkin_visible:
@@ -725,6 +765,8 @@ class FocusWindow(QMainWindow):
             kind, message = self.engine.events.pop(0)
             if view and view["phase"] == "work" and kind in ("nudge", "phone", "doomscroll", "lookaway"):
                 self.show_checkin(message)
+            elif view and view["phase"] == "work" and kind == "appblock":
+                self.show_app_alert(message)
 
     def refresh_session(self, view, camera, browser, connected, now):
         phase = view["phase"]
@@ -755,6 +797,8 @@ class FocusWindow(QMainWindow):
         self.trend.set_values(view["trace"][-SCORE_TREND_POINTS:])
         self.fact_aways.setText(f"{view['look_aways']} look-away{'' if view['look_aways'] == 1 else 's'}")
         self.fact_phone.setText(f"{view['counts']['phone']} phone")
+        app_alerts = view["counts"].get("app", 0)
+        self.fact_apps.setText(f"{app_alerts} app alert{'s' if app_alerts != 1 else ''}")
         if connected:
             self.site_label.setText(f"{browser['domain']} · {SITE_TEXT.get(browser['category'], 'site')}")
         else:
@@ -835,11 +879,12 @@ class FocusWindow(QMainWindow):
             with self.engine.lock:
                 c = dict(self.engine.camera)
             confidence = c.get("phone_confidence")
+            phone_note = " - possible phone, not counted" if c.get("phone_tentative") else ""
             details.setText(f"Camera: {c['status']}\nObservation: {c['reason']}\n"
                             f"Head: yaw {c['yaw']:.3f}, pitch {c['pitch']:.3f}\n"
                             f"Eye estimate: {c['gaze_h']:.3f}, {c['gaze_v']:.3f}\n"
                             f"Phone detector: {c['phone_status']}"
-                            + (f" (confidence {confidence:.2f})" if confidence is not None else "") + "\n"
+                            + (f" (confidence {confidence:.2f}{phone_note})" if confidence else "") + "\n"
                             "These estimates do not establish attention or phone activity.")
         update()
         timer = QTimer(dialog)

@@ -11,7 +11,11 @@ proof; the tracker therefore trades a little latency for stability:
   boosted a little by context (low in the frame, near the face, head pitched down);
 * hysteresis: the smoothed confidence must reach ENTER_CONFIDENCE for MIN_ENTER_SECONDS to
   report a phone, and then it is kept until it falls below EXIT_CONFIDENCE AND the phone
-  has not been seen for GRACE_SECONDS.
+  has not been seen for GRACE_SECONDS;
+* confirming also needs repeated hits and at least one reasonably strong raw score, so a
+  weak detector that keeps muttering about the same object never counts as a phone;
+* in between, a plausible-but-unconfirmed track is reported as ``tentative``: the UI shows
+  it in a lighter colour, and callers must not count it as being on the phone.
 """
 
 from dataclasses import dataclass
@@ -35,7 +39,11 @@ ASSOCIATION_IOU = 0.15         # new detection continues the track if it overlap
 EMA_ALPHA = 0.5                # weight of the newest observation
 ENTER_CONFIDENCE = 0.50        # smoothed confidence needed to start
 EXIT_CONFIDENCE = 0.25         # smoothed confidence below which it may end
-MIN_ENTER_SECONDS = 0.5        # evidence must persist this long before "seen"
+MIN_ENTER_SECONDS = 0.7        # evidence must persist this long before "seen"
+MIN_ENTER_HITS = 3             # ...across at least this many detector runs...
+MIN_PEAK_SCORE = 0.45          # ...at least one of which had this raw detector score
+TENTATIVE_CONFIDENCE = 0.30    # smoothed confidence above which an unconfirmed track is shown
+TENTATIVE_RECENT_SECONDS = 1.0 # ...while it was detected within this long ago
 GRACE_SECONDS = 1.5            # keep reporting a phone this long after the last detection
 STALE_TRACK_SECONDS = 3.0      # drop an unassociated, unconfirmed track after this long
 
@@ -60,10 +68,11 @@ class FaceContext:
 
 @dataclass(frozen=True)
 class PhoneState:
-    seen: bool = False
+    seen: bool = False              # confident: counts as being on the phone
     confidence: float = 0.0
     box: Optional[Box] = None
     since: Optional[float] = None   # timestamp (same clock as update()) when "seen" began
+    tentative: bool = False         # plausible but unconfirmed: draw faintly, never count it
 
 
 def box_iou(a: Box, b: Box) -> float:
@@ -129,11 +138,21 @@ class PhoneTracker:
         self._rising_since: Optional[float] = None
         self._seen = False
         self._since: Optional[float] = None
+        self._hits = 0              # detector hits in the current unconfirmed streak
+        self._peak = 0.0            # strongest raw score in that streak
+
+    @property
+    def _tentative(self) -> bool:
+        return (not self._seen and self._box is not None and self._last_update is not None
+                and self._last_hit is not None
+                and self._confidence >= TENTATIVE_CONFIDENCE
+                and self._last_update - self._last_hit <= TENTATIVE_RECENT_SECONDS)
 
     @property
     def state(self) -> PhoneState:
+        tentative = self._tentative
         return PhoneState(self._seen, round(self._confidence, 3),
-                          self._box if self._seen else None, self._since)
+                          self._box if (self._seen or tentative) else None, self._since, tentative)
 
     def _context_evidence(self, box, score, frame_size, context):
         evidence = score
@@ -190,6 +209,9 @@ class PhoneTracker:
             self._box = box if self._box is None else tuple(
                 0.5 * o + 0.5 * n for o, n in zip(self._box, box))
             self._last_hit = now
+            if not self._seen:
+                self._hits += 1
+                self._peak = max(self._peak, score)
         else:
             self._confidence *= 1.0 - EMA_ALPHA   # silence is evidence of absence
         self._last_update = now
@@ -202,15 +224,18 @@ class PhoneTracker:
             if self._confidence >= ENTER_CONFIDENCE and hit:
                 if self._rising_since is None:
                     self._rising_since = now
-                if now - self._rising_since >= MIN_ENTER_SECONDS:
+                if (now - self._rising_since >= MIN_ENTER_SECONDS and self._hits >= MIN_ENTER_HITS
+                        and self._peak >= MIN_PEAK_SCORE):
                     self._seen = True
                     self._since = now - MIN_ENTER_SECONDS   # evidence began then
                     self._rising_since = None
             else:
                 if self._confidence < EXIT_CONFIDENCE:
                     self._rising_since = None   # a 50% flicker may keep building; silence may not
+                    self._hits, self._peak = 0, 0.0
                 if self._last_hit is None or now - self._last_hit > STALE_TRACK_SECONDS:
                     self._rising_since = None
+                    self._hits, self._peak = 0, 0.0
                     self._box = None
                     self._confidence = 0.0
         else:
@@ -219,6 +244,7 @@ class PhoneTracker:
                 self._seen = False
                 self._since = None
                 self._rising_since = None
+                self._hits, self._peak = 0, 0.0
                 self._box = None
                 self._confidence = 0.0
 

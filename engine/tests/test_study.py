@@ -231,3 +231,40 @@ def test_report_keeps_score_and_trend(clock):
     assert report["score"] == 100 and report["look_aways"] == 0
     assert report["focus"]["screen"] >= 39
     assert len(report["trace"]) >= 4 and report["trace"][0] == 100
+
+
+def test_desktop_app_time_is_separate_from_focus_score(clock):
+    start()
+    info = {"app": "code", "app_distracting": False, "app_until": 1010.0}
+    study.tick(0, info)
+    clock[0] += 5
+    study.tick(0, {"app": "discord", "app_distracting": True, "app_until": 1020.0})
+    clock[0] += 8
+    study.tick(0, {})                                    # app observation ended; nothing attributed
+    clock[0] += 5
+    view = study.session_view()
+    apps = {a["name"]: a for a in view["apps"]}
+    assert apps["code"]["seconds"] == 5 and not apps["code"]["distracting"]
+    assert apps["discord"]["seconds"] == 8 and apps["discord"]["distracting"]
+    assert view["app_distraction_seconds"] == 8
+    assert view["session_score"] is None                 # apps never change the focus score
+
+
+def test_app_alerts_count_and_reports_keep_top_apps(clock):
+    start()
+    study.record_event("app")
+    for i in range(12):
+        study.tick(0, {"app": f"app{i}", "app_distracting": i == 11, "app_until": clock[0] + 100})
+        clock[0] += 1 + i
+    report = study.stop_session()
+    assert report["counts"]["app"] == 1 and report["nudges"] == 0
+    assert len(report["apps"]) == study.REPORT_APPS
+    assert report["apps"][0]["seconds"] >= report["apps"][-1]["seconds"]
+    assert report["app_distraction_seconds"] > 0
+
+
+def test_app_alert_is_ignored_outside_work(clock):
+    start()
+    study.pause_session()
+    study.record_event("app")
+    assert study.session_view()["counts"]["app"] == 0

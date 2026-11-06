@@ -214,3 +214,60 @@ def test_engine_detect_phone_updates_shared_state_and_confidence(monkeypatch):
         clock["t"] += STEP
     assert engine.camera["phone"] is False
     assert engine.camera["phone_since"] is None and engine.camera["phone_confidence"] == 0.0
+
+
+def test_unconfirmed_phone_is_tentative_and_never_seen():
+    tracker = PhoneTracker()
+    # moderate scores build confidence above the tentative line but never confirm
+    state, t = run(tracker, [True] * 20, score=0.3)
+    assert not state.seen
+    assert state.tentative and state.box is not None and state.since is None
+    assert 0.3 <= state.confidence < pd.ENTER_CONFIDENCE + 0.2
+
+
+def test_tentative_becomes_confident_with_a_strong_detection_and_clears_flag():
+    tracker = PhoneTracker()
+    state, t = run(tracker, [True] * 2, score=0.8)
+    assert state.tentative and not state.seen
+    state, t = run(tracker, [True] * 8, start=t, score=0.8)
+    assert state.seen and not state.tentative
+
+
+def test_tentative_disappears_when_detections_stop():
+    tracker = PhoneTracker()
+    state, t = run(tracker, [True] * 2, score=0.7)
+    assert state.tentative
+    state, _ = run(tracker, [False] * 6, start=t)
+    assert not state.tentative and not state.seen and state.box is None
+
+
+def test_weak_repeated_detections_need_a_strong_peak_to_confirm():
+    # lower-frame boost makes the smoothed confidence high, but no raw score is strong
+    state, _ = run(PhoneTracker(), [True] * 30, score=0.40)
+    assert not state.seen
+
+
+def test_single_strong_hit_does_not_confirm_without_repeated_hits():
+    tracker = PhoneTracker()
+    state, _ = run(tracker, [True, False, False, False, True, False, False], score=0.9)
+    assert not state.seen
+
+
+def test_engine_does_not_start_phone_timer_for_tentative_phone(monkeypatch):
+    from types import SimpleNamespace as NS
+    import engine
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(engine.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(engine, "camera", dict(engine.camera))
+    detection = NS(bounding_box=NS(origin_x=400, origin_y=300, width=70, height=130),
+                   categories=[NS(score=0.3)])
+    detector = NS(detect_for_video=lambda image, ts: NS(detections=[detection]))
+    tracker = PhoneTracker()
+    for _ in range(20):
+        state = engine.detect_phone(detector, object(), tracker, FRAME)
+        clock["t"] += STEP
+    assert state.tentative
+    assert engine.camera["phone"] is False and engine.camera["phone_since"] is None
+    assert engine.camera["phone_tentative"] is True
+    assert engine.camera["phone_confidence"] > 0
