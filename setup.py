@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import ntpath
 import os
 import shutil
 import subprocess
@@ -77,7 +78,7 @@ def browser_candidates(
         for name, rel in (("Google Chrome", r"Google\Chrome\Application\chrome.exe"),
                           ("Microsoft Edge", r"Microsoft\Edge\Application\msedge.exe")):
             for root in filter(None, roots):
-                path = os.path.join(root, rel)
+                path = ntpath.join(root, rel)  # Windows separators even when tested on another OS
                 if exists(path):
                     found.append((name, path))
                     break
