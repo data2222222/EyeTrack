@@ -90,6 +90,18 @@ const BADGES = {
   "Scattered": ["~", "#b26a00"],
 };
 
+// The tab's title only belongs to its URL once loading is done and the title has caught up with the
+// latest URL change (YouTube and other single-page sites change the URL first, the title later).
+// Pages whose title never changes would wait forever, so the wait ends after TITLE_LAG_MS.
+const TITLE_LAG_MS = 3000;
+const urlChangedAt = new Map();   // tab id -> time of a URL change with no title update since
+
+function freshTitle(tab) {
+  if (tab.status !== "complete" || Date.now() - (urlChangedAt.get(tab.id) || 0) < TITLE_LAG_MS) return "";
+  const title = (tab.title || "").trim();
+  return title && title !== tab.url ? title.slice(0, MAX_TITLE_CHARS) : "";
+}
+
 async function report(tabSwitched = false) {
   lastReport = Date.now();
   let domain = "(outside browser)";
@@ -109,10 +121,11 @@ async function report(tabSwitched = false) {
     }
   }
 
-  // incognito tabs: domain/category only, no path or title (the engine never sends them anywhere)
+  // incognito tabs: domain/category only, no path or title (the engine never sends them anywhere).
+  // A missing title makes the engine wait for the next report instead of judging a bare URL.
   const incognito = !!(tab && tab.incognito);
   const pageInfo = tab && !incognito && category !== "other"
-    ? { path: sanitizePath(tab.url || ""), title: (tab.title || "").slice(0, MAX_TITLE_CHARS) }
+    ? { path: sanitizePath(tab.url || ""), title: freshTitle(tab) }
     : {};
 
   const payload = {
@@ -169,8 +182,11 @@ chrome.runtime.onStartup.addListener(setup);
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === "heartbeat") report(); });
 chrome.tabs.onActivated.addListener(() => report(true));
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (tab.active && (info.url || info.status === "complete")) report();
+  if (info.title) urlChangedAt.delete(tabId);
+  else if (info.url) urlChangedAt.set(tabId, Date.now());
+  if (tab.active && (info.url || info.title || info.status === "complete")) report();
 });
+chrome.tabs.onRemoved.addListener((tabId) => urlChangedAt.delete(tabId));
 chrome.windows.onFocusChanged.addListener(() => report());
 chrome.idle.onStateChanged.addListener(() => report());
 
