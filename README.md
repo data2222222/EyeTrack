@@ -7,22 +7,31 @@ Two parts:
 - `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.
 - `engine/study.py`: study sessions, XP, reports and study tips, used by the window.
 
-## Setup
+## Quick start
+
+```bash
+python setup.py        # python3 setup.py on macOS/Linux
+```
+One script, safe to re-run. It checks Python (3.10 to 3.12) and Tk, creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
+
+**The one manual step** (Chrome does not allow installing an extension silently): on the page that opens, turn on **Developer mode** (top right), click **Load unpacked**, paste the path (Ctrl+L, or Cmd+Shift+G on macOS) or pick the folder that opened.
+
+Later runs: `start.bat` (Windows) or `./start.sh` (macOS/Linux). Both pass options through to the engine: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only). See *Platforms* below for OS notes.
+
+After updating the extension, press the reload icon on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that). Start a study session in the engine window (**Study session** panel at the bottom).
+
+<details>
+<summary>Manual setup</summary>
 
 ```bash
 cd engine
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scriptsctivate
 pip install -r requirements.txt
 python engine.py                   # first run downloads 2 small models (~10 MB)
 ```
-Options: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only).
-See *Platforms* below for OS notes.
-
-Extension: `chrome://extensions` → **Developer mode** → **Load unpacked** → select `extension/`.
-After updating the extension, press ↻ on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that).
-
-Start a study session in the engine window (live view, **Study session** panel at the bottom).
+Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > select `extension/`.
+</details>
 
 ## Platforms
 

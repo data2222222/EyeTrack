@@ -19,8 +19,14 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: engine/requirements.txt
-      - run: pip install -r engine/requirements.txt pytest
-      - run: python -m pytest engine/tests -q
+      - run: python setup.py --no-input --skip-models --skip-extension
+      - name: Run tests in the setup venv
+        shell: bash
+        run: |
+          PY=engine/.venv/bin/python
+          [ -x "$PY" ] || PY=engine/.venv/Scripts/python.exe
+          "$PY" -m pip install pytest
+          "$PY" -m pytest engine/tests -q
       - run: python -m py_compile engine/engine.py engine/study.py
       - if: matrix.os == 'ubuntu-latest'
         run: |
