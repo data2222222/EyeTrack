@@ -460,8 +460,10 @@ def judge(data, domain):
     sv = study.session_view()
     if jev is None or not sv or data.get("category") == "other":
         return None
-    surface = JevSurface("browser", "Chrome", None, domain, str(data.get("path") or "")[:200] or None,
-                         str(data.get("title") or "")[:200] or None, bool(data.get("incognito")))
+    # Chrome's window title is the active tab's title, so it fills both title fields Jev sees.
+    title = str(data.get("title") or "").strip()[:200] or None
+    surface = JevSurface("browser", "Chrome", title, domain, str(data.get("path") or "")[:200] or None,
+                         title, bool(data.get("incognito")))
     try:
         return jev.classify(f"{sv['subject']}: {sv['goal']}", surface)
     except Exception:

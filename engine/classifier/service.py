@@ -1,4 +1,7 @@
-"""Classifier: override > private > cache > (coalesced | Jev in background) with a local-tier fallback."""
+"""Classifier: override > private > cache > Jev in background, with a local-tier fallback.
+
+Cache keys are per page (path + title) and goal, never per domain: a verdict for one Google search
+or YouTube video says nothing about the next one."""
 
 from __future__ import annotations
 
@@ -15,9 +18,11 @@ from typing import Any
 
 from .types import Category, Classification, Clock, Surface
 
-from .cache import DAY_MS, Entry, Store
+from .cache import DAY_MS, HOUR_MS, Entry, Store
 from .jev import JevBackend, make_jev_backend
-from .keys import bucket, display_label, embed_text, goal_hash, make_key, state_text
+from .keys import (
+    bucket, display_label, embed_text, goal_hash, make_key, normalize_title, state_text, surface_title,
+)
 from .local import Embedder, LocalScorer, load_embedder
 from .privacy import NeverSend
 
@@ -25,6 +30,14 @@ log = logging.getLogger(__name__)
 
 ENGINE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ENGINE_DIR / "data"
+
+# Sites whose pages range from on-task to distraction (search, video, encyclopedias, LLM chats).
+# Their verdicts expire after `mixed_ttl_hours` instead of `ttl_days`. Subdomains match too.
+MIXED_DOMAINS = (
+    "google.com", "bing.com", "duckduckgo.com", "youtube.com", "wikipedia.org",
+    "chatgpt.com", "openai.com", "claude.ai", "perplexity.ai", "copilot.microsoft.com",
+    "deepseek.com", "grok.com", "mistral.ai", "poe.com",
+)
 
 
 @dataclass(slots=True)
@@ -36,8 +49,11 @@ class Settings:
     min_confidence: float = (
         0.5  # Jev answers below this are discarded (local tier is used)
     )
-    ttl_days: float = 7.0
-    coalesce_cap: int = 5  # Jev requests per domain/app per trailing hour
+    ttl_days: float = 1.0
+    mixed_ttl_hours: float = 2.0  # cache lifetime on MIXED_DOMAINS
+    mixed_domains: tuple[str, ...] = MIXED_DOMAINS
+    # Jev requests per domain/app per trailing hour. Over the cap, pages keep the list category.
+    hourly_cap: int = 30
     failure_cooldown_s: float = (
         60.0  # before retrying Jev for a key after total failure
     )
@@ -113,8 +129,7 @@ class JevClassifier:
         if self._never_send.matches(surface):
             return Classification(key, "neutral", "private", 1.0, False, ts=now)
 
-        ttl_ms = int(self._s.ttl_days * DAY_MS)
-        if (entry := self._store.get(key, now, ttl_ms)) is not None:
+        if (entry := self._store.get(key, now, self._ttl_ms(surface))) is not None:
             return Classification(
                 key,
                 entry["category"],
@@ -124,7 +139,9 @@ class JevClassifier:
                 ts=entry["ts"],
             )
 
-        if self._backend is None:
+        # No title yet (page still loading, or the title lags an in-page navigation): asking now
+        # would judge a bare URL and cache that, so wait for the report that carries the title.
+        if self._backend is None or not normalize_title(surface_title(surface)):
             return self._local_answer(key, goal, surface, pending=False)
 
         name = bucket(surface)
@@ -133,8 +150,8 @@ class JevClassifier:
                 return self._local_answer(key, goal, surface, pending=True)
             if now < self._retry_after.get(key, 0):
                 return self._local_answer(key, goal, surface, pending=False)
-            if self._store.request_count(name, now) >= self._s.coalesce_cap:
-                return self._coalesced(key, goal, surface, name, ttl_ms)
+            if self._store.request_count(name, now) >= self._s.hourly_cap:
+                return self._local_answer(key, goal, surface, pending=False)
             self._inflight.add(key)
             self._store.record_request(name, now)
         self._pool.submit(self._ask, key, goal, surface, name)
@@ -198,23 +215,11 @@ class JevClassifier:
             if retry_after:
                 self._retry_after[key] = retry_after
 
-    def _coalesced(
-        self, key: str, goal: str, surface: Surface, name: str, ttl_ms: int
-    ) -> Classification:
-        """Cap hit: reuse the freshest answer for this domain/app (stale), else stay local."""
-        now = self._clock.now_ms()
-        entry = self._store.freshest(name, goal_hash(goal), now, ttl_ms)
-        if entry is None:
-            return self._local_answer(key, goal, surface, pending=False)
-        return Classification(
-            key,
-            entry["category"],
-            "cache",
-            entry["confidence"],
-            False,
-            stale=True,
-            ts=entry["ts"],
-        )
+    def _ttl_ms(self, surface: Surface) -> int:
+        domain = surface.domain if surface.kind == "browser" else None
+        if domain and any(domain == d or domain.endswith("." + d) for d in self._s.mixed_domains):
+            return int(self._s.mixed_ttl_hours * HOUR_MS)
+        return int(self._s.ttl_days * DAY_MS)
 
     def _local_answer(
         self, key: str, goal: str, surface: Surface, *, pending: bool
