@@ -151,6 +151,7 @@ async function report(tabSwitched = false) {
       } : { type: "unblock" }).catch(() => {});   // no content script on this page (e.g. opened before install)
     }
   } catch {
+    if (tab) chrome.tabs.sendMessage(tab.id, { type: "unblock" }).catch(() => {});   // engine gone: fail open
     chrome.action.setBadgeText({ text: "off" });
     chrome.action.setBadgeBackgroundColor({ color: "#777777" });
     chrome.action.setTitle({ title: "Study Focus: engine not running" });

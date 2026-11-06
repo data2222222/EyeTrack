@@ -51,7 +51,7 @@
   // why the site was blocked, "Back to studying" and "Give me 5 min" (unlocks after WAIT seconds).
   // background.js re-sends "block" on every report (keeps the clock in sync) and "unblock" when done.
   const WAIT = 10;
-  let screen = null;   // { host, root, els, domain, endAt, total, wait, asked, tick, prevOverflow }
+  let screen = null;   // { host, root, els, domain, endAt, total, wait, tick, prevOverflow }
 
   const STYLE = `
     :host { all: initial; }
@@ -110,7 +110,10 @@
   const timesText = (n) => (n === 1 ? "once" : n === 2 ? "twice" : `${n} times`);
 
   // Keys, wheel and touch must not reach the page under the screen (YouTube's k / space / arrows).
-  // Only Tab (kept inside the screen) and Enter/space on our own buttons do anything.
+  // Only Tab (kept inside the screen) and Enter/space on our own buttons do anything. Key listeners
+  // are registered once at document_start, so they run before any window capture listener the page
+  // adds. Wheel/touch are added only while the screen is up: a permanent non-passive wheel listener
+  // would slow scrolling on every page (and overflow:hidden already stops the page scrolling).
   function guard(e) {
     if (!screen) return;
     e.stopImmediatePropagation();
@@ -124,12 +127,13 @@
     const onOurButton = e.target === screen.host && (e.key === "Enter" || e.key === " ");
     if (!onOurButton && e.cancelable) e.preventDefault();
   }
-  const GUARDED = ["keydown", "keyup", "keypress", "wheel", "touchmove"];
+  ["keydown", "keyup", "keypress"].forEach((t) => addEventListener(t, guard, true));
+  const SCROLLS = ["wheel", "touchmove"];
 
   // Media that starts again under the screen (autoplay, next video) is paused again.
-  function pauseMedia(e) {
+  document.addEventListener("play", (e) => {
     if (screen && e.target instanceof HTMLMediaElement) e.target.pause();
-  }
+  }, true);
 
   function render() {
     const left = Math.max(0, Math.round((screen.endAt - Date.now()) / 1000));
@@ -151,7 +155,6 @@
     screen.endAt = Date.now() + Math.max(0, Number(msg.left) || 0) * 1000;
     screen.total = Number(msg.total) || 0;
     screen.domain = msg.domain;
-    screen.asked = false;
     const named = msg.subject && msg.subject !== "Focus session";   // engine's default when there's no subject
     els.subject.textContent = named ? `${msg.subject} · focus block` : "Focus block";
     els.goal.textContent = msg.goal || "Stay with it until the timer ends";
@@ -176,22 +179,23 @@
       ["subject", "clock", "bar", "goal", "domain", "reason", "src", "back", "skip", "skips"]
         .map((id) => [id, root.getElementById(id)]));
 
-    screen = { host, root, els, domain: "", endAt: 0, total: 0, wait: WAIT, asked: false,
+    screen = { host, root, els, domain: "", endAt: 0, total: 0, wait: WAIT,
                prevOverflow: document.documentElement.style.overflow };
     update(msg);
     screen.tick = setInterval(() => {
       if (screen.wait > 0) screen.wait -= 1;
-      if (render() === 0 && !screen.asked) {
-        screen.asked = true;
-        send({ type: "refresh" });   // block over? background answers with "unblock"
+      if (render() === 0) {
+        // Block over: clear locally (works even if the engine is gone), then let the engine
+        // re-block on the next report if its clock disagrees.
+        hide();
+        send({ type: "refresh" });
       }
     }, 1000);
 
     els.back.onclick = () => send({ type: "leave" });
     els.skip.onclick = () => { send({ type: "allow", domain: screen.domain }); hide(); };
 
-    GUARDED.forEach((t) => addEventListener(t, guard, { capture: true, passive: false }));
-    document.addEventListener("play", pauseMedia, true);
+    SCROLLS.forEach((t) => addEventListener(t, guard, { capture: true, passive: false }));
     document.documentElement.style.overflow = "hidden";
     document.documentElement.appendChild(host);
     els.back.focus();
@@ -200,8 +204,7 @@
   function hide() {
     if (!screen) return;
     clearInterval(screen.tick);
-    GUARDED.forEach((t) => removeEventListener(t, guard, { capture: true }));
-    document.removeEventListener("play", pauseMedia, true);
+    SCROLLS.forEach((t) => removeEventListener(t, guard, { capture: true }));
     document.documentElement.style.overflow = screen.prevOverflow;
     screen.host.remove();
     screen = null;
