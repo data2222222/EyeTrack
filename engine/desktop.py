@@ -5,17 +5,19 @@ Camera algorithms live in tracking.py, session timing in study.py; this module o
 import base64
 import sys
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QGridLayout,
+    QApplication, QButtonGroup, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 import study
+from checkin_audio import CheckinSound
 from widgets import (
     AWAY, BG, BREAK, GOOD, IDLE, LINE, MUTED, PAPER, PHONE, RAISED, SURFACE, TEXT,
     Dropdown, PreviewView, Ring, SplitBar, Trend, score_style,
@@ -182,6 +184,14 @@ class FocusWindow(QMainWindow):
         self.controller = engine.camera_controller
         self.report = None
         self.checkin_visible = False
+        self.checkin_sound = CheckinSound(self)
+        self.checkin_settings_path = str(Path(study.DATA_DIR) / "checkin-sound.json")
+        sound_settings = study.load_json(self.checkin_settings_path, {})
+        if not isinstance(sound_settings, dict):
+            sound_settings = {}
+        music = sound_settings.get("music")
+        self.checkin_music = music if isinstance(music, str) and music else None
+        self.checkin_silent = sound_settings.get("silent") is True
         self.preview_hidden = False
         self.last_tick = time.monotonic()
         self.last_frame = None
@@ -204,7 +214,7 @@ class FocusWindow(QMainWindow):
         header.addWidget(self.connection)
         self.menu_button = QToolButton()
         self.menu_button.setText("⋯")
-        self.menu_button.setToolTip("Calibration and tracking details")
+        self.menu_button.setToolTip("Tracking, check-ins and Chrome setup")
         self.menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.build_menu()
@@ -253,6 +263,14 @@ class FocusWindow(QMainWindow):
         menu = QMenu(self.menu_button)
         self.calibrate_action = menu.addAction("Calibrate screen…", self.calibrate_camera)
         menu.addAction("Tracking details…", self.diagnostics)
+        sounds = menu.addMenu("Check-in sound")
+        self.chime_action = sounds.addAction("Soft chime", lambda: self.set_checkin_sound())
+        self.chime_action.setCheckable(True)
+        self.music_action = sounds.addAction("Choose music…", self.choose_checkin_music)
+        self.music_action.setCheckable(True)
+        self.silence_action = sounds.addAction("No sound", lambda: self.set_checkin_sound(self.checkin_music, silent=True))
+        self.silence_action.setCheckable(True)
+        sounds.aboutToShow.connect(self.update_checkin_sound_menu)
         self.preview_action = menu.addAction("Preview a check-in", self.preview_checkin)
         menu.addSeparator()
         menu.addAction("Connect Chrome…", self.connection_help)
@@ -263,7 +281,35 @@ class FocusWindow(QMainWindow):
         view = study.session_view()
         live = bool(view and view["camera_enabled"] and view["phase"] == "work")
         self.calibrate_action.setEnabled(live and self.engine.camera["status"] == "ok" and not self.controller.simulated)
-        self.preview_action.setEnabled(self.stack.currentIndex() == 1)
+        self.preview_action.setEnabled(self.stack.currentIndex() == 0 or bool(view and view["phase"] == "work"))
+
+    def update_checkin_sound_menu(self):
+        self.chime_action.setChecked(not self.checkin_silent and self.checkin_music is None)
+        self.music_action.setChecked(not self.checkin_silent and self.checkin_music is not None)
+        self.silence_action.setChecked(self.checkin_silent)
+        name = Path(self.checkin_music).name if self.checkin_music else ""
+        self.music_action.setText(f"Choose music… ({name})" if name else "Choose music…")
+
+    def choose_checkin_music(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose check-in music", self.checkin_music or "",
+            "Audio files (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus)",
+        )
+        if path:
+            self.set_checkin_sound(path)
+
+    def set_checkin_sound(self, music=None, *, silent=False):
+        if (music, silent) == (self.checkin_music, self.checkin_silent):
+            return
+        try:
+            study.save_json(self.checkin_settings_path, {"music": music, "silent": silent})
+        except OSError:
+            QMessageBox.warning(self, "Check-in sound", "Couldn't save your check-in sound. Try again after checking folder access.")
+            return
+        self.checkin_music = music
+        self.checkin_silent = silent
+        if silent:
+            self.checkin_sound.stop()
 
     def build_toast(self, root):
         self.checkin = QFrame(root)
@@ -277,8 +323,10 @@ class FocusWindow(QMainWindow):
         box.addWidget(self.checkin_title)
         box.addWidget(self.checkin_message)
         actions = QHBoxLayout()
-        actions.addWidget(button("Keep working", self.dismiss_checkin, "primary"))
-        actions.addWidget(button("Take a break", self.take_break))
+        self.checkin_dismiss_button = button("Keep working", self.dismiss_checkin, "primary")
+        self.checkin_break_button = button("Take a break", self.take_break)
+        actions.addWidget(self.checkin_dismiss_button)
+        actions.addWidget(self.checkin_break_button)
         actions.addStretch()
         box.addLayout(actions)
         self.checkin.hide()
@@ -573,6 +621,7 @@ class FocusWindow(QMainWindow):
             self.setup_error.show()
             return
         self.setup_error.hide()
+        self.dismiss_checkin()
         self.engine.events.clear()
         self.session_error.clear()
         self.preview_hidden = False
@@ -687,6 +736,8 @@ class FocusWindow(QMainWindow):
         self.show_checkin("Is this part of your task?", preview=True)
 
     def dismiss_checkin(self):
+        if self.checkin_visible:
+            self.checkin_sound.stop()
         self.checkin.hide()
         self.checkin_visible = False
 
@@ -696,8 +747,12 @@ class FocusWindow(QMainWindow):
         self.checkin_visible = True
         self.checkin_title.setText("Preview check-in" if preview else "A quick check-in")
         self.checkin_message.setText(message)
+        self.checkin_dismiss_button.setText("Close preview" if preview else "Keep working")
+        self.checkin_break_button.setVisible(not preview)
         self.checkin.show()
         self.place_toast()
+        if not self.checkin_silent:
+            self.checkin_sound.play(self.checkin_music)
         if not preview:
             study.record_event("nudge")
             QApplication.alert(self)
@@ -855,6 +910,7 @@ class FocusWindow(QMainWindow):
             return
         self.timer.stop()
         self.frame_timer.stop()
+        self.dismiss_checkin()
         self.controller.stop()
         self.engine.running = False
         event.accept()

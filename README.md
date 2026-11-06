@@ -42,7 +42,9 @@ Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 an
 - **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.
 - **Linux**: camera via V4L2 (`/dev/video0`, with camera access for your desktop user). If Qt reports a missing XCB cursor library, install `libxcb-cursor0` using your distribution package manager. The desktop interface no longer requires Tk.
 
-Technical camera measurements and a UI-only check-in preview are behind the ⋯ menu.
+Technical camera measurements are behind the ⋯ menu.
+
+Check-ins play a soft, three-second chime by default. Open **⋯ → Check-in sound → Choose music…** to use a local audio file such as an MP3 or WAV. Choose **No sound** for visual check-ins only, or **Soft chime** to restore the default. EyeTrack remembers your choice and uses the soft chime if the music file can't be played. Use **⋯ → Preview a check-in** to try your choice before or during a focus block. Playback stops when you dismiss the check-in.
 
 ## Desktop session flow
 

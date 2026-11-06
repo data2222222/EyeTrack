@@ -1,11 +1,13 @@
 """Exercise the visible session journey with a simulated camera, no image capture."""
 import os
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
+import desktop
 import engine
 import study
 from desktop import FocusWindow
@@ -24,7 +26,9 @@ def window(app, monkeypatch, tmp_path):
     monkeypatch.setattr(study, "session", None)
     monkeypatch.setattr(study, "last_report", None)
     monkeypatch.setattr(study, "reports", [])
+    monkeypatch.setattr(study, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(study, "REPORTS_PATH", str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(desktop, "CheckinSound", lambda parent: Mock())
     monkeypatch.setattr(engine, "camera", dict(engine.camera))
     monkeypatch.setattr(engine, "browser", dict(engine.browser))
     monkeypatch.setattr(engine, "session", dict(engine.session))
@@ -117,16 +121,72 @@ def test_camera_can_be_disabled_and_completion_stays_complete(window):
     assert w.report["active_seconds"] == 1500
 
 
-def test_preview_does_not_create_tracked_nudges(window):
+def test_checkin_plays_once_and_preview_does_not_create_tracked_nudges(window):
     w, _ = window
     w.start_button.click()
-    w.show_checkin("Preview", preview=True)
+    w.preview_action.trigger()
     assert study.session_view()["counts"]["nudge"] == 0
+    w.checkin_sound.play.assert_called_once_with(None)
+    w.checkin_dismiss_button.click()
+    w.checkin_sound.stop.assert_called_once_with()
+    engine.events.extend([("phone", "Real check-in"), ("nudge", "Duplicate")])
+    w.refresh()
+    assert study.session_view()["counts"]["nudge"] == 1
+    assert w.checkin_sound.play.call_count == 2
+    assert w.checkin_message.text() == "Real check-in"
+    w.checkin_break_button.click()
+    assert study.session_view()["phase"] == "break"
+    assert w.checkin_sound.stop.call_count == 2
+
+
+def test_checkin_music_choice_is_saved_and_can_be_reset(window, monkeypatch, tmp_path):
+    w, _ = window
+    music = str(tmp_path / "Focus tune.mp3")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_: (music, ""))
+    w.music_action.trigger()
+    w.update_checkin_sound_menu()
+    assert w.music_action.isChecked()
+    assert "Focus tune.mp3" in w.music_action.text()
+
+    reopened = FocusWindow(engine, start_timer=False)
+    try:
+        reopened.update_menu()
+        assert reopened.preview_action.isEnabled()
+        reopened.preview_action.trigger()
+        reopened.checkin_sound.play.assert_called_once_with(music)
+        assert study.session_view() is None
+        reopened.start_button.click()
+        assert not reopened.checkin_visible
+        reopened.checkin_sound.stop.assert_called_once_with()
+        reopened.end_session(confirm=False)
+    finally:
+        reopened.close()
+
+    w.chime_action.trigger()
+    w.update_checkin_sound_menu()
+    assert w.chime_action.isChecked()
+    assert study.load_json(w.checkin_settings_path, None) == {"music": None, "silent": False}
+
+
+def test_no_sound_keeps_checkins_visible_without_playback(window):
+    w, _ = window
+    w.preview_action.trigger()
+    w.silence_action.trigger()
+    w.checkin_sound.stop.assert_called_once_with()
+    w.checkin_sound.play.reset_mock()
     w.dismiss_checkin()
-    w.show_checkin("Real check-in")
+    w.update_checkin_sound_menu()
+    assert w.silence_action.isChecked()
+    assert study.load_json(w.checkin_settings_path, None) == {"music": None, "silent": True}
+
+    w.preview_action.trigger()
+    assert w.checkin_visible
+    w.start_button.click()
+    engine.events.append(("phone", "Put your phone down."))
+    w.refresh()
+    assert w.checkin_visible
     assert study.session_view()["counts"]["nudge"] == 1
-    w.show_checkin("Duplicate")
-    assert study.session_view()["counts"]["nudge"] == 1
+    w.checkin_sound.play.assert_not_called()
 
 
 def test_live_scoring_and_looking_away_show_in_dashboard(window):
