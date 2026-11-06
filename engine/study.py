@@ -1,6 +1,6 @@
 """
 Study sessions for Study Focus: Pomodoro timer, XP / levels / streaks / badges,
-end-of-session reports with tips, and the AI study helper.
+end-of-session reports with tips, and built-in study tips for when you're stuck.
 The engine calls tick() twice per second; the dashboard talks to it through the engine's HTTP API.
 """
 import datetime
@@ -8,16 +8,12 @@ import json
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 PROFILE_PATH = os.path.join(DATA_DIR, "profile.json")
 REPORTS_PATH = os.path.join(DATA_DIR, "sessions.json")
-CONFIG_PATH = os.path.join(DATA_DIR, "config.json")   # {"anthropic_api_key": "...", "ai_model": "..."}
 
-AI_MODEL = "claude-haiku-5-5"
 XP_PER_MINUTE = {"Focused": 2, "Reading / Thinking": 1, "Other App": 1}
 POMODORO_XP = 20
 GOAL_XP = 30
@@ -221,7 +217,7 @@ def make_tips(r):
         tips.append("You blinked rarely. Use the 20-20-20 rule: every 20 min, look 6 m away for 20 s.")
     stuck = sum(p for m, p in r["moods"] if m in ("Frustrated", "Confused / Surprised"))
     if stuck >= 20 or r["stuck_alerts"]:
-        tips.append("The topic seemed hard. Try the AI helper's 'explain simpler' or start "
+        tips.append("The topic seemed hard. Try the 'explain simpler' study tip or start "
                     "from an easier example next time.")
     if r["yawns"] >= 3 or r["tired_alerts"]:
         tips.append("You looked tired. Short breaks, water and fresh air help more than pushing through.")
@@ -339,54 +335,16 @@ def get_report(report_id):
     return None
 
 
-# ---------------- AI study helper ----------------
-OFFLINE_HELP = {
+# ---------------- study tips ----------------
+STUDY_TIPS = {
     "explain": "Try the Feynman trick: explain the topic out loud in simple words as if to a 10-year-old. "
                "Where you get stuck is exactly the part to re-read.",
     "example": "Find the simplest possible example in your notes or textbook and solve it step by step. "
                "Then change one number and solve it again.",
     "quiz": "Cover your notes and write down 3 questions about the topic. Answer them, then check.",
 }
-AI_PROMPTS = {
-    "explain": "Explain it much more simply, step by step, with one everyday analogy.",
-    "example": "Give 2 short worked examples: one very easy, one a bit harder. Show each step.",
-    "quiz": "Make 3 short quiz questions (easy to medium). Put all answers at the very end under 'Answers:'.",
-}
 
 
-def ai_settings():
-    config = load_json(CONFIG_PATH, {})
-    key = os.environ.get("ANTHROPIC_API_KEY") or config.get("anthropic_api_key", "")
-    return key.strip(), config.get("ai_model", AI_MODEL)
-
-
-def ask_ai(subject, question, mode):
-    mode = mode if mode in AI_PROMPTS else "explain"
-    key, model = ai_settings()
-    if not key:
-        return {"ok": False, "offline": True,
-                "text": "AI helper is not connected yet. Add an Anthropic API key "
-                        "(see README: 'AI helper'). Meanwhile, a study trick:\n\n" + OFFLINE_HELP[mode]}
-    body = {
-        "model": model,
-        "max_tokens": 800,
-        "system": "You are a friendly, patient study tutor. The student is stuck and a bit frustrated. "
-                  "Be short, clear and encouraging. Plain text, short paragraphs, no markdown headings. "
-                  "Answer in the same language the student writes in.",
-        "messages": [{"role": "user", "content":
-                      f"Subject: {subject or 'general'}\nWhat I'm stuck on: {question or 'the current topic'}\n\n"
-                      f"{AI_PROMPTS[mode]}"}],
-    }
-    request = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=json.dumps(body).encode(),
-        headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            data = json.load(response)
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        return {"ok": True, "text": text.strip() or "(empty answer)"}
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode(errors="replace")[:300]
-        return {"ok": False, "text": f"AI request failed ({e.code}): {detail}"}
-    except Exception as e:
-        return {"ok": False, "text": f"AI request failed: {e}\n\nOffline tip: {OFFLINE_HELP[mode]}"}
+def study_tip(mode):
+    """A built-in study technique for when you're stuck. Works offline; nothing is sent anywhere."""
+    return {"ok": True, "text": STUDY_TIPS.get(mode, STUDY_TIPS["explain"])}

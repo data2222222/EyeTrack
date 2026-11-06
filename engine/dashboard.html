@@ -210,16 +210,13 @@
     </section>
 
     <section class="card" id="help">
-      <h2>AI study helper</h2>
-      <label for="aiQ">What are you stuck on?</label>
-      <textarea id="aiQ" placeholder="e.g. I don't understand eigenvectors"></textarea>
+      <h2>Stuck? Try a study technique</h2>
       <div class="modes">
         <button class="primary" data-mode="explain">Explain simpler</button>
         <button data-mode="example">Easy examples</button>
         <button data-mode="quiz">Quiz me</button>
       </div>
       <div class="answer" id="aiAnswer"></div>
-      <div class="note" id="aiNote"></div>
     </section>
 
     <section class="card">
@@ -370,8 +367,6 @@ function render(data) {
     ? P.badges.map((b) => `<div class="badge">🏅 ${esc(b.name)}<small>${esc(b.info)}</small></div>`).join("")
     : '<div class="note">Finish a session to earn your first badge.</div>';
 
-  $("aiNote").textContent = data.ai_ready ? "" : "AI not connected: add an Anthropic API key (see README). Offline tips still work.";
-
   // toasts for new popups
   for (const e of data.events) {
     if (seenEvents.has(e.id)) continue;
@@ -413,18 +408,13 @@ document.querySelectorAll("[data-goal]").forEach((b) => b.onclick = async () => 
   if (report && report.id) { showReport(report); loadHistory(); }
 });
 
-// AI helper
+// study tips (built in, offline)
 document.querySelectorAll("[data-mode]").forEach((b) => b.onclick = async () => {
-  const buttons = document.querySelectorAll("[data-mode]");
-  buttons.forEach((x) => x.disabled = true);
   $("aiAnswer").style.display = "block";
-  $("aiAnswer").textContent = "Thinking…";
-  const subject = (current && current.session && current.session.subject) || $("subject").value;
   try {
-    const r = await api("/api/ai", { subject, question: $("aiQ").value, mode: b.dataset.mode });
+    const r = await api("/api/tip", { mode: b.dataset.mode });
     $("aiAnswer").textContent = r.text;
   } catch { $("aiAnswer").textContent = "Engine not reachable."; }
-  buttons.forEach((x) => x.disabled = false);
 });
 
 // demo
@@ -477,8 +467,9 @@ function showReport(r) {
 }
 $("reportModal").onclick = (e) => { if (e.target.id === "reportModal") e.target.style.display = "none"; };
 
-if (location.hash === "#help") setTimeout(() => { $("help").scrollIntoView({ behavior: "smooth" }); $("aiQ").focus(); }, 300);
-window.addEventListener("hashchange", () => { if (location.hash === "#help") $("aiQ").focus(); });
+const showHelp = () => { if (location.hash === "#help") $("help").scrollIntoView({ behavior: "smooth" }); };
+setTimeout(showHelp, 300);
+window.addEventListener("hashchange", showHelp);
 
 nextFrame();
 poll();

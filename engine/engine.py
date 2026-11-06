@@ -395,7 +395,7 @@ def simulate_tired():
 def simulate_stuck():
     study.record_event("stuck")
     emit("stuck", "You look stuck or frustrated.\n"
-                  "Try an easier example, re-read the basics,\nor ask the AI helper.")
+                  "Try an easier example, re-read the basics,\nor open the study tips.")
 
 
 def simulate_phone():
@@ -516,7 +516,7 @@ def api_state():
         "has_frame": preview["png"] is not None,
     }
     return {"live": live, "session": study.session_view(), "profile": study.profile_view(),
-            "events": list(recent_events), "ai_ready": bool(study.ai_settings()[0])}
+            "events": list(recent_events)}
 
 
 def camera_text():
@@ -644,10 +644,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": study.start_break()})
         elif path == "/api/session/resume":
             self.send_json(200, {"ok": study.resume_work()})
-        elif path == "/api/ai":
-            self.send_json(200, study.ask_ai(str(data.get("subject", ""))[:80],
-                                             str(data.get("question", ""))[:1500],
-                                             str(data.get("mode", "explain"))))
+        elif path == "/api/tip":
+            self.send_json(200, study.study_tip(str(data.get("mode", "explain"))))
         elif path == "/api/override":
             study.record_event("override")
             self.send_json(200, {"ok": True})
@@ -1158,7 +1156,7 @@ def run_ui(fake_camera, global_keys, compact):
                       command=lambda: (study.start_break(), win.destroy())).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         elif kind == "stuck":
-            tk.Button(buttons, text="Ask AI helper", width=14,
+            tk.Button(buttons, text="Study tips", width=14,
                       command=lambda: (webbrowser.open(DASHBOARD_URL + "#help"), win.destroy())
                       ).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
