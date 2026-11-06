@@ -22,7 +22,7 @@ class Entry(TypedDict):
     source: str  # "jev" for cached remote answers
     confidence: float
     ts: int
-    bucket: str  # domain or app, for coalescing
+    bucket: str  # domain or app
     goal_hash: str
     label: str  # url-path / title shown in the cache inspector
 
@@ -72,20 +72,6 @@ class Store:
         with self._lock:
             self.entries[key] = entry
             self._save()
-
-    def freshest(
-        self, bucket: str, goal_hash: str, now: int, ttl_ms: int
-    ) -> Entry | None:
-        """Newest live entry of this bucket for the current goal (coalescing fallback)."""
-        with self._lock:
-            live = [
-                e
-                for e in self.entries.values()
-                if e["bucket"] == bucket
-                and e["goal_hash"] == goal_hash
-                and now - e["ts"] <= ttl_ms
-            ]
-            return max(live, key=lambda e: e["ts"], default=None)
 
     def request_count(self, bucket: str, now: int) -> int:
         with self._lock:

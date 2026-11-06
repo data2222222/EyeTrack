@@ -104,6 +104,17 @@ def test_key_includes_goal_and_title_hash_and_ignores_query():
         browser(title="  (3) INTRO ", url="https://youtube.com/watch?v=secret#t=5"),
     )
     assert a.startswith("browser:youtube.com|")
+    # two chats with the same generic title are different pages
+    chat = browser("chatgpt.com", "ChatGPT", url="https://chatgpt.com/c/one")
+    assert make_key("goal a", chat) != make_key(
+        "goal a", browser("chatgpt.com", "ChatGPT", url="https://chatgpt.com/c/two"))
+
+
+def test_state_text_sends_title_once():
+    text = state_text(GOAL, Surface("browser", "Chrome", "Capacitors - Google Search", "google.com",
+                                    "https://google.com/search", "Capacitors - Google Search"))
+    assert "Page title: Capacitors - Google Search" in text and "Window title" not in text
+    assert "Window title: Notes" in state_text(GOAL, Surface("app", "Obsidian", "Notes"))
 
 
 def test_state_text_capped_and_query_stripped():
@@ -176,6 +187,16 @@ def test_total_failure_marks_unreachable_and_uses_local(tmp_path):
 def test_no_backend_is_local_only_and_unreachable(tmp_path):
     result = make(tmp_path, None).classify(GOAL, browser())
     assert result.source == "local" and result.remote_unreachable and not result.pending
+
+
+@pytest.mark.parametrize("title", [None, "", "   "])
+def test_no_title_is_not_sent_or_cached(tmp_path, title):
+    backend = FakeJev()
+    clf = make(tmp_path, backend)
+    loading = Surface("browser", "Chrome", title, "google.com", "https://google.com/search", title)
+    result = clf.classify(GOAL, loading)
+    assert result.source == "local" and not result.pending
+    assert backend.states == []
 
 
 def test_no_goal_does_nothing(tmp_path):
@@ -259,10 +280,26 @@ def test_cache_persists_across_restart_and_expires(tmp_path):
     settle(clf, backend)
     assert json.loads((tmp_path / "classifications.json").read_text())["entries"]
 
-    clock.frozen_ms = 1_000_000 + 6 * 86_400_000
-    assert make(tmp_path, FakeJev(), clock).classify(GOAL, browser()).source == "cache"
-    clock.frozen_ms = 1_000_000 + 8 * 86_400_000
-    assert make(tmp_path, FakeJev(), clock).classify(GOAL, browser()).source == "local"
+    page = browser("github.com", "repo")
+    clf.classify(GOAL, page)
+    settle(clf, backend)
+    clock.frozen_ms = 1_000_000 + 20 * 3_600_000
+    assert make(tmp_path, FakeJev(), clock).classify(GOAL, page).source == "cache"
+    clock.frozen_ms = 1_000_000 + 25 * 3_600_000
+    assert make(tmp_path, FakeJev(), clock).classify(GOAL, page).source == "local"
+
+
+@pytest.mark.parametrize("domain", ["youtube.com", "www.google.com", "en.wikipedia.org", "claude.ai", "chatgpt.com"])
+def test_mixed_sites_expire_after_two_hours(tmp_path, domain):
+    clock = Clock(frozen_ms=1_000_000)
+    backend = FakeJev()
+    clf = make(tmp_path, backend, clock)
+    clf.classify(GOAL, browser(domain))
+    settle(clf, backend)
+    clock.frozen_ms += 2 * 3_600_000 - 1000
+    assert clf.classify(GOAL, browser(domain)).source == "jev"
+    clock.frozen_ms += 2000
+    assert clf.classify(GOAL, browser(domain)).source == "local"   # expired: asks Jev again
 
 
 def test_goal_change_means_new_key(tmp_path):
@@ -279,30 +316,26 @@ def test_goal_change_means_new_key(tmp_path):
 # ---------------------------------------------------------------- coalescing
 
 
-def test_coalescing_cap_reuses_freshest_domain_answer_as_stale(tmp_path):
+def test_hourly_cap_never_reuses_another_pages_verdict(tmp_path):
     clock = Clock(frozen_ms=1_000_000)
     backend = FakeJev(JevResult("distraction", 0.9))
-    clf = make(tmp_path, backend, clock)
-    for i in range(5):
+    clf = make(tmp_path, backend, clock, hourly_cap=3)
+    for i in range(3):
         backend.done.clear()
-        clf.classify(GOAL, browser(title=f"video {i}"))
+        clf.classify(GOAL, browser("google.com", f"search {i}"))
         assert backend.done.wait(5)
         clock.frozen_ms += 1000
     wait_idle(clf)
-    assert len(backend.states) == 5
 
-    sixth = clf.classify(GOAL, browser(title="video 6"))
-    assert sixth.stale and sixth.source == "cache" and sixth.category == "distraction"
-    assert len(backend.states) == 5
+    # over the cap: the new search keeps the list category, not the last search's "distraction"
+    fourth = clf.classify(GOAL, browser("google.com", "capacitor charging - Google Search"))
+    assert fourth.source == "local" and not fourth.pending
+    assert len(backend.states) == 3
 
-    # a different domain is unaffected
-    other = clf.classify(GOAL, browser("github.com", "repo"))
-    assert other.pending and not other.stale
-
-    # the hour rolls off
+    # a different domain is unaffected, and the hour rolls off
+    assert clf.classify(GOAL, browser("github.com", "repo")).pending
     clock.frozen_ms += 3_600_000
-    clf2 = make(tmp_path, FakeJev(), clock)
-    assert not clf2.classify(GOAL, browser(title="video 7")).stale
+    assert make(tmp_path, FakeJev(), clock, hourly_cap=3).classify(GOAL, browser("google.com", "next")).pending
 
 
 # ---------------------------------------------------------------- config
