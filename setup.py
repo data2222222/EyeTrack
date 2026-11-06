@@ -159,13 +159,6 @@ def step_python() -> bool:
         print("    " + python_help(sys.platform))
         return False
     say(OK, f"Python {label}")
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        say(FAIL, "tkinter is missing (the Study Focus window needs it).")
-        print("    " + tk_help(sys.platform))
-        return False
-    say(OK, "tkinter available")
     return True
 
 

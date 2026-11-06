@@ -14,7 +14,7 @@ Window keys (click the window first):
     B  demo: 50 minutes of study         -> eye-rest popup
     T  demo: tired (yawning)             -> tired popup
     X  demo: frustrated face             -> "stuck?" popup
-    C  recalibrate "looking at the screen" (look at the screen center for 2 s)
+    C  guided screen calibration (follow five dots with your eyes)
     V  show / hide the live view
     Q  quit
 Study sessions are started in the live view: subject, goal, work/break minutes, Start / Break / Stop, History.
@@ -22,6 +22,7 @@ Optional global hotkeys (if `pip install pynput`): Ctrl+Shift+D, Ctrl+Shift+B
 """
 import argparse
 import collections
+from contextlib import ExitStack
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import study
+import tracking
 
 # ---------------- settings ----------------
 PORT = 8000
@@ -50,13 +52,7 @@ EXTENSION_STALE_SECONDS = 75     # extension heartbeat is every 30 s
 
 CAMERA_INDEX = 0
 CAMERA_FPS = 15                  # high enough to catch blinks
-CENTER_BAND = 0.6                # nose must be inside the central 60% of the frame
-YAW_TOLERANCE = 0.15             # head: allowed deviation from the calibrated pose
-PITCH_TOLERANCE = 0.10
-GAZE_H_TOLERANCE = 0.10          # eyes: iris position left/right inside the eye
-GAZE_V_TOLERANCE = 0.35          # eyes: looking up/down score
-CALIBRATION_FRAMES = 30          # ~2 s at 15 FPS
-SMOOTHING_FRAMES = 10            # majority vote over the last N frames
+CAMERA_READ_TIMEOUT = 5.0        # stop a disconnected/stalled feed with a useful error
 
 EYES_CLOSED_LEVEL = 0.5          # blink score above this = eyes closed
 BLINK_MAX_SECONDS = 0.5          # closed shorter than this = a blink
@@ -141,6 +137,7 @@ EXPRESSION_NAMES = ["Smile", "Frown", "Brow down", "Brow raise", "Jaw open", "Ey
 # ---------------- shared state ----------------
 lock = threading.Lock()
 running = True
+camera_controller = None
 show_preview = True
 browser = {"domain": "waiting for extension", "category": "neutral", "idle": "active",
            "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False,
@@ -153,7 +150,7 @@ camera = {"status": "starting", "present": False, "facing": False, "reason": "-"
           "scores": {n: 0.0 for n in EXPRESSION_NAMES},
           "phone": False, "phone_since": None, "phone_status": "starting", "yawns_total": 0,
           "last_seen": time.time(), "started": time.time()}
-calib = {"yaw": None, "pitch": None, "gaze_h": None, "gaze_v": None, "samples": [], "active": True}
+calib = tracking.Calibration()
 blinks = collections.deque()          # timestamps
 yawns = collections.deque()           # timestamps
 expression_log = collections.deque()  # (timestamp, label)
@@ -285,7 +282,7 @@ def tick(dt):
         b = dict(browser)
         c = dict(camera)
     sv = study.session_view()
-    on_break = bool(sv and sv["phase"] == "break")   # Pomodoro break: no distraction alerts
+    on_break = not bool(sv and sv["phase"] == "work")
 
     # doom-scrolling: lots of scrolling / short videos on a non-study site, sustained
     if is_doom_scrolling(b, now):
@@ -311,17 +308,21 @@ def tick(dt):
     for kind, message in study.tick(dt, {
             "state": state, "index": session["index"], "domain": b["domain"],
             "category": b["category"], "expression": c["expression"],
-            "blink_rate": blink_rate(now), "yawns_total": c["yawns_total"]}):
+            "blink_rate": blink_rate(now), "yawns_total": c["yawns_total"],
+            "browser_age": max(0, now - b["updated"]) if b["updated"] else None,
+            "camera_category": ("present" if c["present"] else "no_face") if c["status"] == "ok" else "unavailable",
+            "camera_observed_at": c.get("observed_at")}):
         emit(kind, message)
 
-    if state == "AFK":
-        # clock paused; being away for a while also counts as a break
-        session["since_break"] = 0
+    sv = study.session_view()
+    if not sv or sv["phase"] != "work":
         session["distraction_streak"] = 0
         session["nudged"] = False
+        session["doom_streak"] = 0
+        session["doom_alerted"] = False
         return
 
-    session["active_seconds"] += dt
+    session["active_seconds"] = sv["active_seconds"]
     session["since_break"] += dt
     if state == "Focused":
         session["focused_seconds"] += dt
@@ -335,7 +336,6 @@ def tick(dt):
         if session["distraction_streak"] >= NUDGE_AFTER_SECONDS and not session["nudged"]:
             session["nudged"] = True
             minutes = max(1, round(session["distraction_streak"] / 60))
-            study.record_event("nudge")
             emit("nudge", f"You've been on {b['domain']} for {minutes} min.\n"
                           "Ready to get back to studying?")
     elif state != "Away":  # a short glance away doesn't reset the streak
@@ -362,8 +362,7 @@ def tick(dt):
             emit("break", "You've been studying for 50 minutes.\n"
                           "Look at something ~6 m away for 20 seconds.")
 
-    if not on_break:
-        wellbeing_checks(now, b, c, state)
+    # Expression/fatigue heuristics remain diagnostic rather than session interventions.
     history.append((now, STATE_SCORES.get(state, 0.5), dt))
     update_index(now)
 
@@ -600,9 +599,9 @@ def start_server(port):
 
 
 # ---------------- face analysis ----------------
-LEFT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
-RIGHT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
-LEFT_IRIS, RIGHT_IRIS = 468, 473  # iris centers (Face Landmarker gives 478 points)
+RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+LEFT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+LEFT_IRIS, RIGHT_IRIS = 473, 468  # anatomical sides; Face Landmarker gives 478 points
 
 
 def set_camera(**values):
@@ -610,26 +609,12 @@ def set_camera(**values):
         camera.update(values)
 
 
-def head_pose(lm):
-    """Rough yaw/pitch ratios from face landmarks (0.5 ~ centered)."""
-    nose = lm[1]
-    left, right = lm[234], lm[454]      # cheek edges
-    top, chin = lm[10], lm[152]         # forehead, chin
-    yaw = (nose.x - left.x) / ((right.x - left.x) or 1e-6)
-    pitch = (nose.y - top.y) / ((chin.y - top.y) or 1e-6)
-    return nose, yaw, pitch
+def head_pose(lm, aspect=1.0):
+    return tracking.head_pose(lm, aspect)
 
 
-def eye_gaze(lm, bs):
-    """gaze_h: iris position between the eye corners (0.5 = center, averaged over both eyes).
-    gaze_v: looking down (+) / up (-) from the model's eye blendshapes."""
-    def ratio(iris, a, b):
-        lo, hi = min(lm[a].x, lm[b].x), max(lm[a].x, lm[b].x)
-        return (lm[iris].x - lo) / ((hi - lo) or 1e-6)
-    gaze_h = (ratio(LEFT_IRIS, 33, 133) + ratio(RIGHT_IRIS, 362, 263)) / 2
-    down = (bs.get("eyeLookDownLeft", 0) + bs.get("eyeLookDownRight", 0)) / 2
-    up = (bs.get("eyeLookUpLeft", 0) + bs.get("eyeLookUpRight", 0)) / 2
-    return gaze_h, down - up
+def eye_gaze(lm, bs, aspect=1.0):
+    return tracking.eye_gaze(lm, bs, aspect)
 
 
 def read_expression(bs):
@@ -663,16 +648,16 @@ def read_expression(bs):
 
 
 def gaze_direction(gaze_h, gaze_v):
-    base_h = calib["gaze_h"] if calib["gaze_h"] is not None else 0.5
-    base_v = calib["gaze_v"] if calib["gaze_v"] is not None else 0.0
+    _, bounds = calib.profile()
+    (lo_h, hi_h), (lo_v, hi_v) = bounds[2:]
     parts = []
-    if gaze_v - base_v > GAZE_V_TOLERANCE:
+    if gaze_v > hi_v:
         parts.append("down")
-    elif gaze_v - base_v < -GAZE_V_TOLERANCE:
+    elif gaze_v < lo_v:
         parts.append("up")
-    if gaze_h - base_h > GAZE_H_TOLERANCE:
+    if gaze_h > hi_h:
         parts.append("right")
-    elif gaze_h - base_h < -GAZE_H_TOLERANCE:
+    elif gaze_h < lo_h:
         parts.append("left")
     return "-".join(parts) if parts else "center"
 
@@ -681,13 +666,10 @@ def attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed):
     """Is the user looking at the screen? Returns (bool, reason)."""
     if eyes_closed:
         return False, "eyes closed"
-    margin = (1 - CENTER_BAND) / 2
-    if not (margin <= nose.x <= 1 - margin):
-        return False, "face off-center"
-    base_yaw = calib["yaw"] if calib["yaw"] is not None else 0.5
-    if abs(yaw - base_yaw) > YAW_TOLERANCE:
+    _, bounds = calib.profile()
+    if not bounds[0][0] <= yaw <= bounds[0][1]:
         return False, "head turned away"
-    if calib["pitch"] is not None and abs(pitch - calib["pitch"]) > PITCH_TOLERANCE:
+    if not bounds[1][0] <= pitch <= bounds[1][1]:
         return False, "head tilted"
     direction = gaze_direction(gaze_h, gaze_v)
     if direction != "center":
@@ -695,18 +677,8 @@ def attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed):
     return True, "eyes on screen"
 
 
-def calibrate(yaw, pitch, gaze_h, gaze_v):
-    calib["samples"].append((yaw, pitch, gaze_h, gaze_v))
-    if len(calib["samples"]) >= CALIBRATION_FRAMES:
-        n = len(calib["samples"])
-        for i, key in enumerate(("yaw", "pitch", "gaze_h", "gaze_v")):
-            calib[key] = sum(s[i] for s in calib["samples"]) / n
-        calib["samples"] = []
-        calib["active"] = False
-
-
-def reset_calibration():
-    calib.update(yaw=None, pitch=None, gaze_h=None, gaze_v=None, samples=[], active=True)
+def reset_calibration(guided=False):
+    calib.start(guided=guided)
 
 
 def track_blinks_and_yawns(now, eyes_closed, jaw, st):
@@ -730,20 +702,51 @@ def track_blinks_and_yawns(now, eyes_closed, jaw, st):
         st["jaw_since"] = None
 
 
-def analyze_face(lm, bs, st, votes, expression_votes):
+def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
     """All per-frame analysis for one detected face; updates shared camera state."""
     now = time.time()
-    nose, yaw, pitch = head_pose(lm)
-    gaze_h, gaze_v = eye_gaze(lm, bs)
+    stamp = time.monotonic()
     label, scores = read_expression(bs)
-    eyes_closed = scores["Eyes closed"] > EYES_CLOSED_LEVEL
+    eyes_closed = min(bs.get("eyeBlinkLeft", 0), bs.get("eyeBlinkRight", 0)) > EYES_CLOSED_LEVEL
     track_blinks_and_yawns(now, eyes_closed, scores["Jaw open"], st)
 
-    if calib["active"] and not eyes_closed:
-        calibrate(yaw, pitch, gaze_h, gaze_v)
-    looking, reason = attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed)
-    votes.append(looking)
-    facing = sum(votes) * 2 > len(votes)
+    generation = calib.view()["generation"]
+    if st.get("calibration_generation") != generation:
+        st["filter"] = tracking.AttentionFilter()
+        st["calibration_generation"] = generation
+    smoother = st.setdefault("filter", tracking.AttentionFilter())
+    quality = tracking.landmark_quality(lm, aspect)
+    yaw, pitch, gaze_h, gaze_v = camera["yaw"], camera["pitch"], camera["gaze_h"], camera["gaze_v"]
+    if quality is None:
+        try:
+            nose, yaw, pitch = head_pose(lm, aspect)
+            if not eyes_closed:
+                gaze_h, gaze_v = eye_gaze(lm, bs, aspect)
+        except ValueError as exc:
+            quality = str(exc)
+    if quality:
+        calib.interrupt(quality)
+        st.pop("filter", None)
+        facing, reason = False, quality
+    elif eyes_closed:
+        # Freeze the last good gaze through normal blinks; don't filter bad iris points.
+        if st["closed_since"] is not None and now - st["closed_since"] < BLINK_MAX_SECONDS:
+            smoother.pending = None
+            facing, reason = smoother.facing, "blinking"
+        else:
+            facing, reason = smoother.update(False, "eyes closed", stamp)
+    else:
+        values = (yaw, pitch, gaze_h, gaze_v)
+        # Either eyelid closing makes the iris position unsuitable for calibration.
+        if max(bs.get("eyeBlinkLeft", 0), bs.get("eyeBlinkRight", 0)) < .35:
+            calib.add(values, stamp)
+        yaw, pitch, gaze_h, gaze_v = smoother.smooth(values, stamp)
+        state = calib.view()
+        if state["active"]:
+            facing, reason = True, "calibrating: " + state["message"]
+        else:
+            looking, detail = attention(nose, yaw, pitch, gaze_h, gaze_v, False)
+            facing, reason = smoother.update(looking, detail, stamp)
     expression_votes.append(label)
     expression = collections.Counter(expression_votes).most_common(1)[0][0]
 
@@ -751,10 +754,21 @@ def analyze_face(lm, bs, st, votes, expression_votes):
         expression_log.append((now, expression))
         camera.update(present=True, facing=facing, reason=reason, yaw=yaw, pitch=pitch,
                       gaze_h=gaze_h, gaze_v=gaze_v,
-                      gaze_text="closed" if eyes_closed else gaze_direction(gaze_h, gaze_v),
+                      gaze_text="uncertain" if quality else ("closed" if eyes_closed else gaze_direction(gaze_h, gaze_v)),
                       eyes_closed=eyes_closed, closed_since=st["closed_since"],
                       expression=expression, scores=scores, last_seen=now)
     return facing, reason
+
+
+def clear_face_tracking(st, expression_votes, reason="no face"):
+    """Discard timers, filters and calibration samples when observations stop."""
+    expression_votes.clear()
+    st.clear()
+    st.update(closed_since=None, jaw_since=None)
+    calib.interrupt("Move into view and look at the target")
+    set_camera(present=False, facing=False, reason=reason, closed_since=None,
+               eyes_closed=False, gaze_text="-", expression="-",
+               scores={n: 0.0 for n in EXPRESSION_NAMES})
 
 
 def pick_fonts(platform, families, default_family, fixed_family):
@@ -776,6 +790,12 @@ def open_camera(cv2, index, platform=sys.platform):
     for backend in [*camera_backends(cv2, platform), None]:
         cap = cv2.VideoCapture(index) if backend is None else cv2.VideoCapture(index, backend)
         if cap.isOpened():
+            # Modest capture size keeps inference responsive on laptop CPUs. Some
+            # drivers ignore these requests; tracking uses the actual frame aspect.
+            for name, value in (("CAP_PROP_FRAME_WIDTH", 640), ("CAP_PROP_FRAME_HEIGHT", 480),
+                                ("CAP_PROP_FPS", CAMERA_FPS), ("CAP_PROP_BUFFERSIZE", 1)):
+                if hasattr(cv2, name) and hasattr(cap, "set"):
+                    cap.set(getattr(cv2, name), value)
             return cap
         cap.release()
     return None
@@ -834,11 +854,8 @@ def detect_phone(detector, image, phone_votes):
 
 
 def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None):
-    """Draw face points, eyes, gaze arrow, phone box, the center band and the verdict (in memory only)."""
+    """Draw face points, eyes, gaze arrow, phone box and verdict (in memory only)."""
     h, w = frame.shape[:2]
-    margin = int(w * (1 - CENTER_BAND) / 2)
-    for x in (margin, w - margin):
-        cv2.line(frame, (x, 0), (x, h), (180, 180, 180), 1)
     if phone_box:
         x, y, bw, bh = phone_box
         cv2.rectangle(frame, (x, y), (x + bw, y + bh), (160, 30, 220), 3)
@@ -866,15 +883,17 @@ def draw_overlay(cv2, frame, lm, facing, reason, phone_box=None):
             gh, gv, closed = camera["gaze_h"], camera["gaze_v"], camera["eyes_closed"]
             expression, scores = camera["expression"], dict(camera["scores"])
         if not closed:
-            base_h = calib["gaze_h"] if calib["gaze_h"] is not None else 0.5
-            base_v = calib["gaze_v"] if calib["gaze_v"] is not None else 0.0
+            center, _ = calib.profile()
+            base_h, base_v = center[2:]
             sx, sy = px(168)
             end = (int(sx + (gh - base_h) * 600), int(sy + (gv - base_v) * 120))
             cv2.arrowedLine(frame, (sx, sy), end, (255, 220, 0), 2, tipLength=0.3)
         label = "LOOKING AT SCREEN" if facing else "NOT LOOKING"
         detail = reason
-        if calib["active"]:
-            detail += "  |  calibrating: look at the screen center"
+        calibration = calib.view()
+        if calibration["active"]:
+            label = "CALIBRATING"
+            detail = f"{calibration['message']} ({int(calibration['progress'] * 100)}%)"
         cv2.rectangle(frame, (0, h - 34), (w, h), (25, 25, 25), -1)
         cv2.putText(frame, f"Expression: {expression}   (smile {scores['Smile']:.2f}, "
                            f"brow down {scores['Brow down']:.2f})",
@@ -903,7 +922,7 @@ CAMERA_DENIED_HINT = ("camera not available: allow camera access for your termin
                       "System Settings > Privacy & Security > Camera")
 
 
-def camera_loop(camera_index):
+def camera_loop(camera_index, stop_event=None):
     try:
         import cv2
         import mediapipe as mp
@@ -921,62 +940,94 @@ def camera_loop(camera_index):
             set_camera(status=f"model download failed: {e}")
             return
 
-    options = vision.FaceLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
-        running_mode=vision.RunningMode.VIDEO,
-        output_face_blendshapes=True,
-        num_faces=1)
-    landmarker = vision.FaceLandmarker.create_from_options(options)
-    phone_detector = make_phone_detector(vision, mp_python)
-    phone_votes = collections.deque(maxlen=4)
-    phone_box = None
-    frame_number = 0
+    try:
+        with ExitStack() as resources:
+            options = vision.FaceLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=MODEL_PATH),
+                running_mode=vision.RunningMode.VIDEO,
+                output_face_blendshapes=True,
+                num_faces=1)
+            landmarker = vision.FaceLandmarker.create_from_options(options)
+            resources.callback(landmarker.close)
+            phone_detector = make_phone_detector(vision, mp_python)
+            if phone_detector is not None:
+                resources.callback(phone_detector.close)
+            phone_votes = collections.deque(maxlen=4)
+            phone_box = None
+            frame_number = 0
 
-    cap = open_camera(cv2, camera_index)
-    if cap is None:
-        set_camera(status=CAMERA_DENIED_HINT if sys.platform == "darwin" else "camera not available")
-        return
+            cap = open_camera(cv2, camera_index)
+            if cap is None:
+                set_camera(status=CAMERA_DENIED_HINT if sys.platform == "darwin" else "camera not available")
+                return
+            resources.callback(cap.release)
 
-    votes = collections.deque(maxlen=SMOOTHING_FRAMES)
-    expression_votes = collections.deque(maxlen=CAMERA_FPS * 2)
-    st = {"closed_since": None, "jaw_since": None}
-    frame_time = 1.0 / CAMERA_FPS
-    set_camera(status="ok", started=time.time())
-    while running:
-        started = time.monotonic()
-        ok, frame = cap.read()
-        if not ok:
-            time.sleep(0.5)
-            continue
-        # frames stay in memory only: never saved, never sent anywhere
-        frame = cv2.flip(frame, 1)  # mirror view, feels natural in the preview
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = landmarker.detect_for_video(image, int(time.monotonic() * 1000))
+            expression_votes = collections.deque(maxlen=CAMERA_FPS * 2)
+            st = {"closed_since": None, "jaw_since": None}
+            frame_time = 1.0 / CAMERA_FPS
+            last_frame = time.monotonic()
+            last_timestamp = -1
+            set_camera(status="ok", started=time.time())
+            while running and not (stop_event is not None and stop_event.is_set()):
+                started = time.monotonic()
+                ok, frame = cap.read()
+                if not ok:
+                    clear_face_tracking(st, expression_votes, "camera frame unavailable")
+                    phone_votes.clear()
+                    phone_box = None
+                    set_camera(status="camera interrupted; retrying...", phone=False, phone_since=None,
+                               observed_at=None)
+                    preview["png"] = None
+                    if time.monotonic() - last_frame >= CAMERA_READ_TIMEOUT:
+                        raise RuntimeError("camera stopped delivering frames; reconnect it and restart")
+                    time.sleep(.1)
+                    continue
+                last_frame = time.monotonic()
+                set_camera(status="ok")
+                # frames stay in memory only: never saved, never sent anywhere
+                frame = cv2.flip(frame, 1)  # mirror view, feels natural in the preview
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                last_timestamp = max(last_timestamp + 1, int(time.monotonic() * 1000))
+                result = landmarker.detect_for_video(image, last_timestamp)
+                set_camera(observed_at=time.monotonic())
 
-        lm = result.face_landmarks[0] if result.face_landmarks else None
-        facing, reason = False, "no face"
-        if lm:
-            bs = {}
-            if result.face_blendshapes:
-                bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
-            facing, reason = analyze_face(lm, bs, st, votes, expression_votes)
-        else:
-            votes.clear()
-            st.update(closed_since=None, jaw_since=None)
-            set_camera(present=False, facing=False, reason="no face", closed_since=None,
-                       eyes_closed=False, gaze_text="-")
+                lm = result.face_landmarks[0] if result.face_landmarks else None
+                facing, reason = False, "no face"
+                if lm:
+                    bs = {}
+                    if result.face_blendshapes:
+                        bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
+                    facing, reason = analyze_face(lm, bs, st, expression_votes,
+                                                  aspect=frame.shape[1] / frame.shape[0])
+                else:
+                    clear_face_tracking(st, expression_votes)
 
-        frame_number += 1
-        if phone_detector and frame_number % PHONE_EVERY_N_FRAMES == 0:
-            phone_box = detect_phone(phone_detector, image, phone_votes)
+                frame_number += 1
+                if phone_detector and frame_number % PHONE_EVERY_N_FRAMES == 0:
+                    try:
+                        phone_box = detect_phone(phone_detector, image, phone_votes)
+                    except Exception as exc:
+                        # Phone detection is optional; it must not take face tracking down.
+                        phone_detector = None
+                        phone_box = None
+                        phone_votes.clear()
+                        set_camera(phone=False, phone_since=None,
+                                   phone_status=f"off (detector error: {str(exc)[:60]})")
 
-        if show_preview:
-            store_preview(cv2, draw_overlay(cv2, frame, lm, facing, reason, phone_box))
+                if show_preview:
+                    store_preview(cv2, draw_overlay(cv2, frame, lm, facing, reason, phone_box))
 
-        time.sleep(max(0.0, frame_time - (time.monotonic() - started)))
-    cap.release()
-    landmarker.close()
+                time.sleep(max(0.0, frame_time - (time.monotonic() - started)))
+        set_camera(status="stopped")
+    except Exception as exc:
+        set_camera(status=f"camera error ({type(exc).__name__}): {str(exc)[:100]}")
+    finally:
+        set_camera(present=False, facing=False, phone=False, phone_since=None,
+                   phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
+                   expression="-", scores={n: 0.0 for n in EXPRESSION_NAMES}, observed_at=None)
+        calib.interrupt("Camera stopped; look at screen center when it resumes")
+        preview["png"] = None
 
 
 # ---------------- optional global hotkeys ----------------
@@ -1008,7 +1059,7 @@ def fmt_clock(seconds):
     return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def run_ui(fake_camera, global_keys, compact):
+def run_legacy_ui(fake_camera, global_keys, compact):
     global running, show_preview, UI_FONT, MONO_FONT
     import tkinter as tk
     import tkinter.font as tkfont
@@ -1050,6 +1101,13 @@ def run_ui(fake_camera, global_keys, compact):
     cam_label = tk.Label(left, bg="black", fg=MUTED, image=placeholder,
                          text="camera starting...", compound="center")
     cam_label.pack()
+    calibration_button = tk.Button(left, text="Calibrate screen (C)",
+                                   state="disabled" if fake_camera else "normal")
+    calibration_button.pack(fill="x", pady=(6, 0))
+    calibration_status = tk.Label(left, bg=BG, fg=MUTED, font=(UI_FONT, 9),
+                                  wraplength=PREVIEW_WIDTH - 12)
+    if not fake_camera:
+        calibration_status.pack(fill="x", pady=(3, 0))
 
     expr_frame = tk.Frame(left, bg=PANEL, padx=12, pady=8)
     expr_frame.pack(fill="x", pady=(8, 0))
@@ -1317,13 +1375,85 @@ def run_ui(fake_camera, global_keys, compact):
     phase_button.config(command=toggle_phase)
     history_button.config(command=show_history)
 
+    # --- guided screen calibration ---
+    calibration_window = [None]
+    offered_calibration = [fake_camera or compact]
+
+    def open_calibration():
+        if fake_camera:
+            return
+        if calibration_window[0] is not None:
+            calibration_window[0].lift()
+            return
+        with lock:
+            ready = camera["status"] == "ok"
+        if not ready:
+            messagebox.showinfo("Camera calibration", "Wait for the camera to be ready first.", parent=root)
+            return
+        offered_calibration[0] = True
+        reset_calibration(guided=True)
+        win = tk.Toplevel(root)
+        calibration_window[0] = win
+        win.title("Calibrate screen")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.attributes("-fullscreen", True)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def close(cancel=True):
+            if calibration_window[0] is not win:
+                return
+            if cancel:
+                calib.cancel()
+            calibration_window[0] = None
+            win.destroy()
+
+        win.bind("<Escape>", lambda event: close())
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.focus_set()
+
+        def refresh_calibration():
+            if not running or calibration_window[0] is not win:
+                return
+            state = calib.view()
+            canvas.delete("all")
+            width, height = canvas.winfo_width(), canvas.winfo_height()
+            if not state["active"]:
+                limited = state["quality"] == "limited"
+                canvas.create_text(width / 2, height / 2, text=state["message"],
+                                   fill="#ffcc80" if limited else "#80dca2",
+                                   font=(UI_FONT, 24, "bold"), width=width * .8, justify="center")
+                win.after(3500 if limited else 700, lambda: close(cancel=False))
+                return
+            _, x, y = state["target"]
+            cx, cy = width * x, height * y
+            canvas.create_oval(cx - 22, cy - 22, cx + 22, cy + 22, outline="#5b8def", width=3)
+            canvas.create_arc(cx - 29, cy - 29, cx + 29, cy + 29, start=90,
+                              extent=-359 * state["progress"], style="arc", outline="#80dca2", width=4)
+            canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill="white", outline="")
+            canvas.create_text(width / 2, height * .32,
+                               text="Follow the dot with your eyes\nKeep your usual sitting position",
+                               fill=FG, font=(UI_FONT, 20), justify="center")
+            with lock:
+                camera_status = camera["status"]
+            message = state["message"] if camera_status == "ok" else camera_status
+            canvas.create_text(width / 2, height * .70,
+                               text=f"Point {state['stage'] + 1} of 5 · {message}\nEsc to cancel",
+                               fill=MUTED, font=(UI_FONT, 14), justify="center")
+            win.after(50, refresh_calibration)
+
+        win.after(100, refresh_calibration)
+
+    calibration_button.config(command=open_calibration)
+
     # --- keys ---
     def handle_key(k):
         global show_preview
         if k in DEMO_ACTIONS:
             DEMO_ACTIONS[k]()
         elif k == "c":
-            reset_calibration()
+            open_calibration()
         elif k == "v":
             show_preview = not show_preview
             preview["png"] = None
@@ -1409,8 +1539,12 @@ def run_ui(fake_camera, global_keys, compact):
             c = dict(camera)
             cam = camera_text()
             yawn_count = sum(1 for t in yawns if now_wall - t <= YAWN_WINDOW)
-        if calib["active"] and c["status"] == "ok" and not fake_camera:
-            cam += " · calibrating, look at screen"
+        calibration = calib.view()
+        calibration_status.config(text=calibration["message"])
+        if calibration["active"] and c["status"] == "ok" and not fake_camera:
+            cam += f" · {calibration['message']} {int(calibration['progress'] * 100)}%"
+        if not offered_calibration[0] and c["status"] == "ok" and c["present"]:
+            open_calibration()
         domain = b["domain"]
         if b["updated"] and now_wall - b["updated"] > EXTENSION_STALE_SECONDS:
             domain += " (extension silent)"
@@ -1529,29 +1663,82 @@ def run_ui(fake_camera, global_keys, compact):
     running = False
 
 
+class CameraController:
+    """Session-owned capture; joins the worker before releasing the camera."""
+
+    def __init__(self, index=0, simulated=False):
+        self.index = index
+        self.simulated = simulated
+        self.worker = None
+        self.stop_event = threading.Event()
+        self.enabled = False
+        set_camera(status="off", present=False, facing=False, phone=False,
+                   phone_since=None, observed_at=None, phone_status="off")
+
+    def start(self):
+        if self.enabled:
+            return
+        self.stop_event.clear()
+        self.enabled = True
+        set_camera(status="starting", present=False, facing=False, phone=False,
+                   phone_since=None, observed_at=None, last_seen=time.time())
+        if self.simulated:
+            set_camera(status="ok", present=True, facing=True, reason="simulated",
+                       observed_at=time.monotonic())
+            return
+        self.worker = threading.Thread(target=camera_loop,
+                                       args=(self.index, self.stop_event), name="camera")
+        try:
+            self.worker.start()
+        except Exception:
+            self.enabled = False
+            self.worker = None
+            raise
+
+    def stop(self):
+        self.enabled = False
+        self.stop_event.set()
+        if self.worker is not None:
+            self.worker.join()
+            self.worker = None
+        set_camera(status="off", present=False, facing=False, phone=False,
+                   phone_since=None, observed_at=None, phone_status="off")
+        preview["png"] = None
+
+
+def run_ui(fake_camera=False, global_keys=False, compact=False):
+    from desktop import run
+    run(sys.modules[__name__], compact=compact)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Study Focus Engine")
-    parser.add_argument("--no-camera", action="store_true", help="simulate the camera with keys P and F")
-    parser.add_argument("--compact", action="store_true", help="start with only the small status bar")
+    global running, camera_controller
+    parser = argparse.ArgumentParser(description="EyeTrack desktop focus sessions")
+    parser.add_argument("--no-camera", action="store_true", help="simulate camera input for testing")
+    parser.add_argument("--compact", action="store_true", help="use a smaller desktop window")
     parser.add_argument("--camera-index", type=int, default=CAMERA_INDEX)
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
-
+    running = True
     init_classifier()
     try:
-        start_server(args.port)
+        server = start_server(args.port)
     except OSError:
         print(f"Port {args.port} is busy. Close the other engine or use --port.")
+        if jev is not None:
+            jev.close()
         return
-    print(f"Engine listening on http://127.0.0.1:{args.port}  (GET /status)")
-
-    if args.no_camera:
-        set_camera(status="ok", present=True, facing=True, reason="simulated", last_seen=time.time())
-        calib["active"] = False
-    else:
-        threading.Thread(target=camera_loop, args=(args.camera_index,), daemon=True).start()
-
-    run_ui(args.no_camera, start_global_hotkeys(), args.compact)
+    print(f"Engine listening on http://127.0.0.1:{server.server_address[1]}  (GET /status)")
+    camera_controller = CameraController(args.camera_index, args.no_camera)
+    try:
+        run_ui(args.no_camera, False, args.compact)
+    finally:
+        running = False
+        camera_controller.stop()
+        server.shutdown()
+        server.server_close()
+        if jev is not None:
+            jev.close()
 
 
 if __name__ == "__main__":

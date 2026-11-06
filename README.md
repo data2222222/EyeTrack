@@ -1,24 +1,25 @@
-# Study Focus: a camera + browser study coach
+# EyeTrack — desktop focus sessions
 
-Study Focus watches *how* you study (browser activity plus your webcam, processed only on your laptop) and helps you stay focused: Pomodoro sessions, distraction and doom-scroll detection, phone detection, tiredness and frustration alerts, study tips when you're stuck, session reports, XP and streaks.
+A clean desktop flow for one focus block: choose computer, notebook or both; optionally enter a goal; work with a timer and optional local camera; then review actual session time. The Chrome extension supplies website activity to the desktop app. Camera observations are estimates, not proof of attention or productivity.
 
 Two parts:
 - `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session.
 - `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.
-- `engine/study.py`: study sessions, XP, reports and study tips, used by the window.
+- `engine/desktop.py`: PySide6 setup, active-session and summary screens.
+- `engine/study.py`: timestamp-based session clock, pauses, actual breaks and session summaries.
 
 ## Quick start
 
 ```bash
 python setup.py        # python3 setup.py on macOS/Linux
 ```
-One script, safe to re-run. It checks Python (3.10 to 3.12) and Tk, creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
+One script, safe to re-run. It checks Python (3.10 to 3.12) and creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
 
 **The one manual step** (Chrome does not allow installing an extension silently): on the page that opens, turn on **Developer mode** (top right), click **Load unpacked**, paste the path (Ctrl+L, or Cmd+Shift+G on macOS) or pick the folder that opened.
 
-Later runs: `start.bat` (Windows) or `./start.sh` (macOS/Linux). Both pass options through to the engine: `--no-camera` (simulate with keys P / F), `--compact` (small status bar only). See *Platforms* below for OS notes.
+Later runs: `start.bat` (Windows) or `./start.sh` (macOS/Linux). Both pass options through to the engine: `--no-camera` (simulated camera input for testing), `--compact` (smaller desktop window). See *Platforms* below for OS notes.
 
-After updating the extension, press the reload icon on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that). Start a study session in the engine window (**Study session** panel at the bottom).
+After updating the extension, press the reload icon on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that). Choose your setup in the desktop window and press **Start session**. The camera stays off until you start a camera-enabled session.
 
 <details>
 <summary>Manual setup</summary>
@@ -37,27 +38,25 @@ Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > sele
 
 Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 and 3.12). Use Python 3.10 to 3.12: the `mediapipe` wheels do not cover newer versions yet.
 
-- **Windows**: works out of the box (camera via DirectShow, Segoe UI / Consolas, HiDPI aware). Global hotkeys need no extra permission.
-- **macOS**: python.org Python includes Tk; with Homebrew run `brew install python-tk`. Allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera (the status line says so when it is blocked). Global hotkeys (`pip install pynput`) also need that app under Privacy & Security > Accessibility. Model downloads use the `certifi` CA bundle.
-- **Linux**: `sudo apt install python3-tk` if Tk is missing. Camera via V4L2 (`/dev/video0`, your user must be in the `video` group). Global hotkeys need an X11 session; they do not work on Wayland.
+- **Windows**: camera via DirectShow; Qt supplies the desktop interface.
+- **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.
+- **Linux**: camera via V4L2 (`/dev/video0`, with camera access for your desktop user). If Qt reports a missing XCB cursor library, install `libxcb-cursor0` using your distribution package manager. The desktop interface no longer requires Tk.
 
-Global hotkeys are optional. If `pynput` is missing or cannot start (permission, Wayland), the engine prints one line and keeps running with the window keys only.
+The session UI uses visible controls. Technical camera measurements and a UI-only check-in preview are behind **Diagnostics**.
 
-## Features
+## Desktop session flow
 
-**Study sessions (engine window)**: type a subject and goal, set work/break minutes (25/5 by default) and press **Start session**. While it runs the panel shows the phase and countdown with **Break / Resume** and **Stop** (asks "Did you reach your goal?", then shows the report). A profile line shows level, XP to the next level, streak and badges; **History** lists past sessions and opens their reports. During focus blocks, **Focus mode** is on: distracting sites get a full-page "You're in a study session" screen with *Back to studying* (goes back in the tab's history, or to a new tab) or *Continue anyway* (enabled after 10 s, allows that site for 5 min; counted in the report). During breaks there are no distraction alerts.
+1. **Set up:** choose Computer / Notebook / Computer & notebook, enter an optional goal, choose 15 / 25 / 45 minutes, and choose whether to use the camera. The mode is saved with the session; notebook-specific calibration is a separate work item.
+2. **Work:** a large remaining-time clock, camera/browser status and **Pause / Resume**, **Take a break**, **End session** controls. Camera preview is collapsible; measurements stay in Diagnostics.
+3. **Review:** actual active time, paused time, actual break duration/count, check-ins shown, separate website/camera observations and optional goal-completion self-report. **Start another session** returns to setup.
 
-**Distraction detection**
-- *Distracted*: distracting site + eyes on it → nudge after 60 s.
-- *Doom-scrolling*: on any non-study site, ≥8000 px of scrolling per minute (~8 screens) or ≥4 new short videos per minute (Shorts, Reels, TikTok), sustained 60 s → alert.
-- *On Phone*: the camera's object detector sees a phone for 3+ s → state "On Phone", counts a pickup; popup after 20 s.
-- *Context switching*: switches between sites/apps in the last 30 min and the average minutes per task (attention span).
+Only an explicit pause or break stops active time. Camera absence and AFK do not pause it. Resuming preserves the remaining work block. Five-minute breaks can end early or stay open longer; they never auto-resume. A completed block stops at its planned duration instead of automatically starting another block.
 
-**Wellbeing (camera)**: eye gaze (iris + model eye-direction), blink rate, eyes closed ≥2 s (sleepy), yawns, expressions (Happy, Concentrating, Frustrated, Confused, Unhappy, Yawning). Tired → "Start break now"; frustrated for most of a minute → "Stuck?" with a button to the study tips; blink rate < 6/min → eye-rest popup. Expressions are estimates of facial movement, not mind reading.
+The camera starts only for camera-enabled work and is stopped/joined on pause, break, completion, end and app close. The real camera and both detector resources are released before shutdown. Calibration/tracking remains in `tracking.py` and is being developed separately.
 
-**Study tips**: *Explain simpler*, *Easy examples*, *Quiz me* in the "Stuck?" popup (button *Study tips*) give a built-in study technique for when you're stuck. They work offline and send nothing anywhere.
+Reports are saved locally in `engine/data/sessions.json`; older reports are preserved. The UI does not show productivity scores, mood, XP or streaks. Website and camera categories each describe active time independently. Missing/stale camera observations are unavailable after one second. Browser observation freshness still follows the existing collector's heartbeat; improving event-boundary accounting is a remaining browser task.
 
-**Reports, XP, streaks**: when you stop a session a report window opens: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
+The extension's existing focus overlay is an intervention, not navigation blocking. User domain settings, return-to-work behavior and overlay cleanup remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
 
 ## Goal-aware classification (Jev)
 
@@ -75,31 +74,18 @@ python -m classifier.spike                  # optional: try 5 sample pages again
 
 **How it behaves**: one question per page ("productive, neutral or distraction?"). Answers are cached in `engine/data/classifications.json` for 7 days, per site + page title + goal. At most 5 requests per domain per hour; after that the latest answer for that domain is reused. Answers with confidence below 0.5 are discarded. Requests run in the background, so a new page keeps its list category until Jev answers (a few seconds, shown as "Jev pending").
 
-**Where you see it**: the *Category* row shows the verdict and its source, e.g. `distraction (Jev 0.97)`, `productive (Jev, cached)`, `productive (list)`. The source is one of `jev`, `cache`, `override`, `private`, `list`; "Jev pending" is shown while an answer is on its way.
+**Where you see it**: the desktop Browser card shows the current domain and effective category. The classifier retains verdict source/confidence internally; Jev is optional and the app runs without a key.
 
 **Fallbacks**: no key, no `typesafe-sdk` or no network → the extension's lists are used (the engine never needs Jev to run). A small local model (MiniLM, `engine/models/`) scores similarity to your goal as a second opinion; its guesses are never strong enough to override the lists today. If the classifier cannot be imported the engine prints one line and behaves exactly as before.
 
-## Decision matrix
+## Observation signals
 
-| Browser / camera | State | Action |
-|---|---|---|
-| Phone in hand (camera) | On Phone | popup after 20 s, pickup counted |
-| Non-study site + endless scrolling / short videos | Doom-scrolling | alert after 60 s |
-| Study site + eyes on screen | Focused | silent |
-| Study site + looking away / down | Reading / Thinking | silent (no false alarm) |
-| Distracting site + eyes on it | Distracted | nudge after 60 s; focus screen in a session |
-| Distracting site, not watching | Idle Tab | silent |
-| Other app in front (VS Code, PDF…) | Other App | silent |
-| Neutral + ≥15 tab switches / 5 min | Scattered | lowers the index |
-| No face < 3 min / ≥ 3 min or screen locked | Away / AFK | AFK pauses the clock |
-
-**Productivity Index**: time-weighted average of state scores over the last 10 minutes.
-
-## Demo keys (desktop window)
-D distraction · S doom-scroll · M phone · T tired · X stuck · B eye break · C recalibrate · V live view · Q quit.
+Camera and website observations are kept separate in the summary. A visible phone is not proof of phone use; an off-camera phone is unobserved. The camera-derived legacy state does not control the session timer. Expression/fatigue heuristics and the old fake-time keyboard demos are not part of the new session interface. **Diagnostics → Preview check-in** previews UI without incrementing tracked nudges.
 
 ## Accuracy tips
-Look at the middle of the screen and press **C** (2 s). Light on your face, no bright window behind you. Thresholds are at the top of `engine.py` (`YAW_TOLERANCE`, `GAZE_H_TOLERANCE`, `DOOM_SCROLL_PX`, `PHONE_SCORE`, …). For a live demo, `NUDGE_AFTER_SECONDS = 15` and `DOOM_AFTER_SECONDS = 20` make alerts fire faster.
+During a session with the camera enabled, choose **Calibrate screen** in the camera panel or **Diagnostics**. Follow the five dots with your eyes, keeping your usual sitting position; the ring fills while tracking is stable. Repeat this after moving your camera, chair, or screen. **Esc** cancels and keeps the last completed calibration. If eye movement is unclear, calibration shows a warning and keeps the previous profile (or a center-only fallback on the first run). Without guided calibration, look at screen center and hold still for about three seconds for the automatic center calibration. Calibration is kept for the current run.
+
+Use even light on your face and avoid a bright window behind you. Brief blinks are ignored for attention; prolonged eye closure still registers. Head tilt and sitting off-center no longer count as looking away by themselves. Tiny, clipped, or unreliable eye landmarks show a tracking hint and are excluded from calibration. This is a webcam estimate of attention, not a precise screen-coordinate eye tracker. Calibration defaults are in `engine/tracking.py`; other thresholds such as `DOOM_SCROLL_PX` and `PHONE_SCORE` remain at the top of `engine.py`.
 
 ## Privacy
 Camera frames stay in memory and are never saved or uploaded. The extension sends the domain, the URL path (no query string or fragment), the page title and scroll counts to `127.0.0.1` only; incognito tabs send the domain only. The local server refuses requests from other websites. Text leaves your laptop in one case only: **during a study session with a Jev key configured**, your goal, the domain, URL path and page title of the active tab are sent to the Jev API to classify it (see *Goal-aware classification*). Without a key, nothing about your pages leaves the machine.

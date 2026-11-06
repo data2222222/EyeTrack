@@ -1,4 +1,5 @@
 opencv-python>=4.8
+PySide6-Essentials>=6.8,<7
 mediapipe>=0.10.14
 # optional: global hotkeys Ctrl+Shift+D / Ctrl+Shift+B
 # pynput
