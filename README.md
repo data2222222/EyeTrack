@@ -13,7 +13,7 @@ Two parts:
 ```bash
 python setup.py        # python3 setup.py on macOS/Linux
 ```
-One script, safe to re-run. It checks Python (3.10 to 3.12) and creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
+One script, safe to re-run. It checks Python (3.10 to 3.14) and creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
 
 **The one manual step** (Chrome does not allow installing an extension silently): on the page that opens, turn on **Developer mode** (top right), click **Load unpacked**, paste the path (Ctrl+L, or Cmd+Shift+G on macOS) or pick the folder that opened.
 
@@ -36,7 +36,7 @@ Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > sele
 
 ## Platforms
 
-Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 and 3.12). Use Python 3.10 to 3.12: the `mediapipe` wheels do not cover newer versions yet.
+Windows, macOS and Linux run the same code (CI tests all three on Python 3.12). Use Python 3.10 to 3.14.
 
 - **Windows**: camera via DirectShow; Qt supplies the desktop interface.
 - **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.

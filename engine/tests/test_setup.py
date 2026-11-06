@@ -32,6 +32,11 @@ def test_linux_checks_path_in_order():
     assert [name for name, _ in found] == ["google-chrome", "chromium"]
 
 
+def test_python_versions():
+    assert study_setup.python_ok((3, 10)) and study_setup.python_ok((3, 14))
+    assert not study_setup.python_ok((3, 9)) and not study_setup.python_ok((3, 15))
+
+
 def test_manifest_validation(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({
         "background": {"service_worker": "bg.js"},
