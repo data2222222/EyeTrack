@@ -2,10 +2,10 @@
 
 Study Focus watches *how* you study (browser activity plus your webcam, processed only on your laptop) and helps you stay focused: Pomodoro sessions, distraction and doom-scroll detection, phone detection, tiredness and frustration alerts, study tips when you're stuck, session reports, XP and streaks.
 
-Three parts:
-- `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session. Clicking the icon opens the dashboard.
-- `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window and the local server on `127.0.0.1:8000`.
-- `engine/study.py` + `engine/dashboard.html`: study sessions, XP, reports, study tips, and the web dashboard at **http://127.0.0.1:8000**.
+Two parts:
+- `extension/`: Chrome extension. Sends the active **domain**, the **URL path** (query string and fragment stripped, at most 3 segments, e.g. `youtube.com/watch`), the **page title**, scrolling amount, idle state and tab switches to the engine. Incognito tabs send the domain only. Shows the focus-mode screen on distracting sites during a study session.
+- `engine/engine.py`: Python. Camera tracking (MediaPipe face landmarks, eyes, expressions, phone detector), the decision engine, the desktop window (the only UI: live view, study sessions, reports) and the local server on `127.0.0.1:8000` that the extension talks to.
+- `engine/study.py`: study sessions, XP, reports and study tips, used by the window.
 
 ## Setup
 
@@ -22,11 +22,11 @@ Linux: `sudo apt install python3-tk` if Tk is missing. macOS: allow camera acces
 Extension: `chrome://extensions` → **Developer mode** → **Load unpacked** → select `extension/`.
 After updating the extension, press ↻ on its card and **reload open tabs** (scroll tracking and the focus screen only run in tabs opened/reloaded after that).
 
-Open the dashboard: click the extension icon, or go to http://127.0.0.1:8000
+Start a study session in the engine window (live view, **Study session** panel at the bottom).
 
 ## Features
 
-**Study sessions (dashboard)**: subject + goal + Pomodoro (25/5 by default). During focus blocks, **Focus mode** is on: distracting sites get a full-page "You're in a study session" screen with *Back to studying* or *Continue anyway* (enabled after 10 s, allows that site for 5 min; counted in the report). During breaks there are no distraction alerts.
+**Study sessions (engine window)**: type a subject and goal, set work/break minutes (25/5 by default) and press **Start session**. While it runs the panel shows the phase and countdown with **Break / Resume** and **Stop** (asks "Did you reach your goal?", then shows the report). A profile line shows level, XP to the next level, streak and badges; **History** lists past sessions and opens their reports. During focus blocks, **Focus mode** is on: distracting sites get a full-page "You're in a study session" screen with *Back to studying* (goes back in the tab's history, or to a new tab) or *Continue anyway* (enabled after 10 s, allows that site for 5 min; counted in the report). During breaks there are no distraction alerts.
 
 **Distraction detection**
 - *Distracted*: distracting site + eyes on it → nudge after 60 s.
@@ -36,9 +36,9 @@ Open the dashboard: click the extension icon, or go to http://127.0.0.1:8000
 
 **Wellbeing (camera)**: eye gaze (iris + model eye-direction), blink rate, eyes closed ≥2 s (sleepy), yawns, expressions (Happy, Concentrating, Frustrated, Confused, Unhappy, Yawning). Tired → "Start break now"; frustrated for most of a minute → "Stuck?" with a button to the study tips; blink rate < 6/min → eye-rest popup. Expressions are estimates of facial movement, not mind reading.
 
-**Study tips**: *Explain simpler*, *Easy examples*, *Quiz me* in the dashboard give a built-in study technique for when you're stuck. They work offline and send nothing anywhere.
+**Study tips**: *Explain simpler*, *Easy examples*, *Quiz me* in the "Stuck?" popup (button *Study tips*) give a built-in study technique for when you're stuck. They work offline and send nothing anywhere.
 
-**Reports, XP, streaks**: at the end of a session you get a report: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
+**Reports, XP, streaks**: when you stop a session a report window opens: focus %, timeline, distractions, phone pickups, doom-scroll episodes, attention span, mood, blink rate, tips. XP: 2/min focused, 1/min reading or other app, +20 per pomodoro, +30 for reaching your goal. Levels, daily streak (≥10 focused min per day) and badges (First Session, Deep Diver, Phone-Free, Pomodoro Pro, Goal Getter, On Fire). Saved in `engine/data/`.
 
 ## Goal-aware classification (Jev)
 
@@ -56,7 +56,7 @@ python -m classifier.spike                  # optional: try 5 sample pages again
 
 **How it behaves**: one question per page ("productive, neutral or distraction?"). Answers are cached in `engine/data/classifications.json` for 7 days, per site + page title + goal. At most 5 requests per domain per hour; after that the latest answer for that domain is reused. Answers with confidence below 0.5 are discarded. Requests run in the background, so a new page keeps its list category until Jev answers (a few seconds, shown as "Jev pending").
 
-**Where you see it**: the *Category* row shows the verdict and its source, e.g. `distraction (Jev 0.97)`, `productive (Jev, cached)`, `productive (list)`. `GET /api/state` has `category_source` (`jev`, `cache`, `override`, `private`, `list`), `category_confidence`, `category_pending` and `jev_online`.
+**Where you see it**: the *Category* row shows the verdict and its source, e.g. `distraction (Jev 0.97)`, `productive (Jev, cached)`, `productive (list)`. The source is one of `jev`, `cache`, `override`, `private`, `list`; "Jev pending" is shown while an answer is on its way.
 
 **Fallbacks**: no key, no `typesafe-sdk` or no network → the extension's lists are used (the engine never needs Jev to run). A small local model (MiniLM, `engine/models/`) scores similarity to your goal as a second opinion; its guesses are never strong enough to override the lists today. If the classifier cannot be imported the engine prints one line and behaves exactly as before.
 
@@ -76,7 +76,7 @@ python -m classifier.spike                  # optional: try 5 sample pages again
 
 **Productivity Index**: time-weighted average of state scores over the last 10 minutes.
 
-## Demo keys (desktop window) / demo buttons (dashboard)
+## Demo keys (desktop window)
 D distraction · S doom-scroll · M phone · T tired · X stuck · B eye break · C recalibrate · V live view · Q quit.
 
 ## Accuracy tips

@@ -43,7 +43,7 @@ _PRIVATE_TITLE_MARKERS = ("incognito", "inprivate", "private browsing")
 class NeverSend:
     """Built-in list merged with user patterns (`{"apps": [...], "domains": [...]}`).
 
-    The user mapping is held by reference and read on every match, so the dashboard's
+    The user mapping is held by reference and read on every match, so a UI's
     "exclude this surface" button (which appends to the config lists) applies immediately."""
 
     def __init__(self, user: Mapping[str, Iterable[str]] | None = None) -> None:

@@ -83,6 +83,6 @@ def embed_text(surface: Surface) -> str:
 
 
 def display_label(surface: Surface) -> str:
-    """Label for the dashboard cache inspector: url-path (or app) plus title."""
+    """Label for a cache inspector: url-path (or app) plus title."""
     head = url_path(surface.url) or bucket(surface)
     return f"{head} | {_clip(surface_title(surface), 100)}".strip(" |")

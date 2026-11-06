@@ -17,17 +17,16 @@ Window keys (click the window first):
     C  recalibrate "looking at the screen" (look at the screen center for 2 s)
     V  show / hide the live view
     Q  quit
+Study sessions are started in the live view: subject, goal, work/break minutes, Start / Break / Stop, History.
 Optional global hotkeys (if `pip install pynput`): Ctrl+Shift+D, Ctrl+Shift+B
 """
 import argparse
-import base64
 import collections
 import json
 import os
 import threading
 import time
 import urllib.request
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import study
@@ -80,7 +79,6 @@ PHONE_EVERY_N_FRAMES = 3         # run the phone detector on every 3rd frame (sa
 CONTEXT_WINDOW = 30 * 60         # context-switch stats over the last 30 minutes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DASHBOARD_PATH = os.path.join(HERE, "dashboard.html")
 MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
              "face_landmarker/float16/1/face_landmarker.task")
 MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
@@ -127,7 +125,6 @@ POPUP_STYLE = {  # kind: (title, color)
     "phone": ("Phone check", "#c2185b"),
     "pomodoro": ("Pomodoro", "#2e7d6b"),
 }
-DASHBOARD_URL = "http://127.0.0.1:8000/"
 EXPRESSION_NAMES = ["Smile", "Frown", "Brow down", "Brow raise", "Jaw open", "Eyes closed"]
 
 # ---------------- shared state ----------------
@@ -155,7 +152,6 @@ session = {"active_seconds": 0.0, "focused_seconds": 0.0, "distracted_seconds": 
            "doom_streak": 0.0, "doom_alerted": False, "on_phone": False,
            "state": "Starting", "index": 100}
 switch_log = collections.deque()      # timestamps of website/app switches
-recent_events = collections.deque(maxlen=20)  # popups, also shown as toasts on the dashboard
 last_alert = {}                       # wellbeing popup kind -> time shown
 history = collections.deque()         # (timestamp, score, weight_seconds)
 timeline = collections.deque()        # (timestamp, state) for the colored strip
@@ -166,13 +162,8 @@ demo_requests = []                    # filled by global hotkeys (other thread)
 
 # ---------------- decision engine ----------------
 def emit(kind, message):
-    """Queue a popup; the window shows it and the dashboard gets it as a toast."""
+    """Queue a popup for the window."""
     events.append((kind, message))
-
-
-def publish(kind, message):
-    title = POPUP_STYLE.get(kind, ("Study Focus", ""))[0]
-    recent_events.append({"id": f"{time.time():.3f}", "kind": kind, "title": title, "text": message})
 
 
 def assess(category, idle, switches, present, facing, missing_seconds, on_phone=False, doom=False):
@@ -485,40 +476,6 @@ def snapshot():
     return snap
 
 
-def api_state():
-    """Everything the dashboard shows, in one JSON."""
-    now = time.time()
-    rate = blink_rate(now)
-    switches, span = context_stats(now)
-    with lock:
-        b = dict(browser)
-        c = dict(camera)
-        cam = camera_text()
-        yawn_count = sum(1 for t in yawns if now - t <= YAWN_WINDOW)
-    state = session["state"]
-    live = {
-        "state": state, "color": STATE_COLORS.get(state, "#4a5568"), "explain": explain(state, b["category"]),
-        "index": session["index"], "domain": b["domain"], "category": b["category"],
-        "category_source": b["category_source"], "category_confidence": b["category_confidence"],
-        "category_pending": b["category_pending"], "jev_online": bool(jev and jev.jev_online),
-        "extension_ok": bool(b["updated"]) and now - b["updated"] <= EXTENSION_STALE_SECONDS,
-        "camera": cam, "camera_status": c["status"], "attention": c["reason"],
-        "calibrating": calib["active"] and c["status"] == "ok",
-        "gaze": c["gaze_text"], "expression": c["expression"], "scores": c["scores"],
-        "blink_rate": round(rate) if rate is not None else None, "yawns_10min": yawn_count,
-        "phone": session["on_phone"], "phone_status": c["phone_status"],
-        "doom_level": round(min(1.0, session["doom_streak"] / DOOM_AFTER_SECONDS), 2),
-        "scroll_px": b["scroll_px"], "swipes": b["swipes"], "feed": b["feed"],
-        "switches_30min": switches, "attention_span_min": span,
-        "active_seconds": round(session["active_seconds"]),
-        "focused_seconds": round(session["focused_seconds"]),
-        "distracted_seconds": round(session["distracted_seconds"]),
-        "has_frame": preview["png"] is not None,
-    }
-    return {"live": live, "session": study.session_view(), "profile": study.profile_view(),
-            "events": list(recent_events)}
-
-
 def camera_text():
     s = camera["status"]
     if s != "ok":
@@ -530,7 +487,7 @@ def camera_text():
 
 # ---------------- local bridge (HTTP) ----------------
 class Handler(BaseHTTPRequestHandler):
-    """Only this machine's dashboard and the Chrome extension may talk to the engine.
+    """Only this machine and the Chrome extension may talk to the engine.
     Other websites can't read camera frames or state (no CORS headers, Origin + Host checks)."""
 
     def allowed(self):
@@ -572,27 +529,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.send_json(403, {"error": "forbidden"})
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
-            try:
-                with open(DASHBOARD_PATH, "rb") as f:
-                    self.send_body(200, f.read(), "text/html; charset=utf-8")
-            except OSError:
-                self.send_json(404, {"error": "dashboard.html missing"})
-        elif path == "/status":
+        if path == "/status":
             self.send_json(200, snapshot())
-        elif path == "/api/state":
-            self.send_json(200, api_state())
-        elif path == "/api/frame":
-            data = preview["png"]
-            if data:
-                self.send_body(200, base64.b64decode(data), "image/png")
-            else:
-                self.send_json(404, {"error": "no frame"})
-        elif path == "/api/reports":
-            self.send_json(200, study.report_list())
-        elif path.startswith("/api/reports/"):
-            report = study.get_report(path.rsplit("/", 1)[-1])
-            self.send_json(200 if report else 404, report or {"error": "not found"})
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -633,32 +571,9 @@ class Handler(BaseHTTPRequestHandler):
                 browser["feed"] = bool(data.get("feed", False))
                 browser["updated"] = now
             self.send_json(200, snapshot())
-        elif path == "/api/session/start":
-            ok, message = study.start_session(str(data.get("subject", "")), str(data.get("goal", "")),
-                                              data.get("work", 25), data.get("break", 5))
-            self.send_json(200 if ok else 409, {"ok": ok, "message": message})
-        elif path == "/api/session/stop":
-            report = study.stop_session(bool(data.get("goal_done")))
-            self.send_json(200 if report else 409, report or {"error": "no session"})
-        elif path == "/api/session/break":
-            self.send_json(200, {"ok": study.start_break()})
-        elif path == "/api/session/resume":
-            self.send_json(200, {"ok": study.resume_work()})
-        elif path == "/api/tip":
-            self.send_json(200, study.study_tip(str(data.get("mode", "explain"))))
         elif path == "/api/override":
             study.record_event("override")
             self.send_json(200, {"ok": True})
-        elif path == "/api/calibrate":
-            reset_calibration()
-            self.send_json(200, {"ok": True})
-        elif path.startswith("/api/demo/"):
-            key = path.rsplit("/", 1)[-1]
-            if key in DEMO_ACTIONS:
-                demo_requests.append(key)
-                self.send_json(200, {"ok": True})
-            else:
-                self.send_json(404, {"error": "unknown demo"})
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -1042,6 +957,7 @@ def fmt_clock(seconds):
 def run_ui(fake_camera, global_keys, compact):
     global running, show_preview
     import tkinter as tk
+    from tkinter import messagebox
 
     BG, PANEL, FG, MUTED = "#15171a", "#1f2226", "#f2f2f2", "#9aa0a6"
     show_preview = not compact
@@ -1106,6 +1022,43 @@ def run_ui(fake_camera, global_keys, compact):
     timeline_canvas = tk.Canvas(info, width=340, height=18, bg="#2b2f34", highlightthickness=0)
     timeline_canvas.pack(anchor="w")
 
+    # --- study session panel (live view only, so --compact stays compact) ---
+    study_panel = tk.Frame(body, bg=PANEL, padx=14, pady=8)
+    study_panel.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+    subject_var, goal_var = tk.StringVar(), tk.StringVar()
+    work_var, break_var = tk.StringVar(value="25"), tk.StringVar(value="5")
+
+    def field(parent, label, **opts):
+        tk.Label(parent, text=label, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED).pack(side="left", padx=(0, 4))
+        w = (tk.Spinbox if "from_" in opts else tk.Entry)(
+            parent, font=("DejaVu Sans Mono", 10), bg="#2b2f34", fg=FG, insertbackground=FG,
+            relief="flat", **opts)
+        w.pack(side="left", padx=(0, 10))
+        return w
+
+    setup_row = tk.Frame(study_panel, bg=PANEL)
+    field(setup_row, "Subject", textvariable=subject_var, width=16)
+    field(setup_row, "Goal", textvariable=goal_var, width=26)
+    field(setup_row, "Work min", textvariable=work_var, from_=1, to=120, width=4, buttonbackground=PANEL)
+    field(setup_row, "Break min", textvariable=break_var, from_=1, to=60, width=4, buttonbackground=PANEL)
+    start_button = tk.Button(setup_row, text="Start session", width=14)
+    start_button.pack(side="left")
+
+    run_row = tk.Frame(study_panel, bg=PANEL)
+    run_label = tk.Label(run_row, font=("DejaVu Sans Mono", 10), bg=PANEL, fg=FG, anchor="w")
+    run_label.pack(side="left", padx=(0, 14))
+    phase_button = tk.Button(run_row, width=10)
+    phase_button.pack(side="left", padx=(0, 6))
+    stop_button = tk.Button(run_row, text="Stop", width=8)
+    stop_button.pack(side="left")
+
+    profile_row = tk.Frame(study_panel, bg=PANEL)
+    profile_label = tk.Label(profile_row, font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED, anchor="w")
+    profile_label.pack(side="left")
+    history_button = tk.Button(profile_row, text="History", width=8)
+    history_button.pack(side="right")
+    shown_row = [None]   # which of setup_row / run_row is visible
+
     keys = ("Demo: D distraction · B break · T tired · X stuck · M phone · S doom-scroll"
             "  |  C calibrate · V live view · Q quit")
     if fake_camera:
@@ -1157,22 +1110,144 @@ def run_ui(fake_camera, global_keys, compact):
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         elif kind == "stuck":
             tk.Button(buttons, text="Study tips", width=14,
-                      command=lambda: (webbrowser.open(DASHBOARD_URL + "#help"), win.destroy())
-                      ).pack(side="left", padx=6)
+                      command=lambda: (show_tips(), win.destroy())).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         elif kind in ("tired",):
             tk.Button(buttons, text="Take a break", width=14, command=win.destroy).pack(side="left", padx=6)
             tk.Button(buttons, text="I'm fine", width=14, command=win.destroy).pack(side="left", padx=6)
         else:
             tk.Button(buttons, text="Got it", width=14, command=win.destroy).pack(side="left", padx=6)
-            tk.Button(buttons, text="Open dashboard", width=14,
-                      command=lambda: (webbrowser.open(DASHBOARD_URL), win.destroy())).pack(side="left", padx=6)
         win.update_idletasks()
         x = (win.winfo_screenwidth() - win.winfo_width()) // 2
         y = (win.winfo_screenheight() - win.winfo_height()) // 3
         win.geometry(f"+{x}+{y}")
         win.lift()
         win.focus_force()
+
+    # --- study windows: report, history, tips ---
+    def new_window(title):
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.attributes("-topmost", True)
+        win.configure(bg=BG)
+        return win
+
+    def draw_report_timeline(canvas, report, width):
+        """Colored state strip for the whole session (same colors as the live strip)."""
+        total = max(1.0, report["duration_min"] * 60)
+        items = report["timeline"]
+        for i, (t, st) in enumerate(items):
+            t_end = items[i + 1][0] if i + 1 < len(items) else total
+            canvas.create_rectangle(int(width * t / total), 0, int(width * t_end / total) + 1, 18,
+                                    fill=STATE_COLORS.get(st, "#4a5568"), width=0)
+
+    def show_report(report):
+        win = new_window("Session report")
+        box = tk.Frame(win, bg=PANEL, padx=18, pady=14)
+        box.pack(padx=10, pady=10)
+
+        def line(text, size=10, color=FG, bold=False, pady=1):
+            tk.Label(box, text=text, font=("DejaVu Sans", size, "bold" if bold else "normal"), bg=PANEL,
+                     fg=color, anchor="w", justify="left", wraplength=440).pack(fill="x", pady=pady)
+
+        line(f"{report['subject']} · {report['duration_min']} min", 16, bold=True)
+        if report["goal"]:
+            line(report["goal"] + ("  (reached)" if report["goal_done"] else "  (not reached)"), color=MUTED)
+        line(f"Focus {report['focus_pct']}%", 22, bold=True, pady=(8, 2))
+        line(f"Focused {report['focused_min']} min · Distracted {report['distracted_min']} min · "
+             f"Pomodoros {report['pomodoros']} · Avg index {report['avg_index']}")
+        line(f"Nudges {report['nudges']} · Overrides {report['overrides']} · "
+             f"Phone pickups {report['phone_pickups']} · Doom-scroll episodes {report['doom_episodes']}")
+        line(f"Attention span {report['attention_span_min']} min per task · best clean run "
+             f"{report['best_streak_min']} min")
+        if report["top_distractions"]:
+            line("Top distractions: " + ", ".join(f"{d} {m} min" for d, m in report["top_distractions"]))
+        if report["moods"]:
+            line("Mood: " + ", ".join(f"{m} {p}%" for m, p in report["moods"]))
+        blink = f"{report['avg_blink']} / min" if report["avg_blink"] is not None else "n/a"
+        line(f"Blink rate {blink} · Yawns {report['yawns']}")
+        tk.Label(box, text="Timeline", font=("DejaVu Sans", 10), bg=PANEL, fg=MUTED,
+                 anchor="w").pack(fill="x", pady=(8, 2))
+        canvas = tk.Canvas(box, width=440, height=18, bg="#2b2f34", highlightthickness=0)
+        canvas.pack(anchor="w")
+        draw_report_timeline(canvas, report, 440)
+        line("Tips", 11, bold=True, pady=(10, 2))
+        for tip in report["tips"]:
+            line("• " + tip)
+        xp = f"+{report['xp_earned']} XP"
+        if report["new_badges"]:
+            xp += " · New badges: " + ", ".join(report["new_badges"])
+        line(xp, 12, bold=True, pady=(10, 0))
+        tk.Button(win, text="Close", width=10, command=win.destroy).pack(pady=(0, 10))
+
+    def show_history():
+        win = new_window("Past sessions")
+        past = study.report_list()
+        listbox = tk.Listbox(win, width=64, height=min(15, max(3, len(past))), bg=PANEL, fg=FG,
+                             font=("DejaVu Sans Mono", 10), selectbackground="#5b8def",
+                             highlightthickness=0, relief="flat", exportselection=False)
+        listbox.pack(padx=10, pady=10)
+        for r in past:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["started"]))
+            listbox.insert("end", f"{when}  {r['subject'][:20]:<20}  {r['duration_min']:>5} min  "
+                                  f"focus {r['focus_pct']:>3}%  +{r['xp_earned']} XP")
+        if not past:
+            listbox.insert("end", "no sessions yet")
+
+        def open_selected(_event):
+            picked = listbox.curselection()
+            report = study.get_report(past[picked[0]]["id"]) if picked and past else None
+            if report:
+                show_report(report)
+        listbox.bind("<<ListboxSelect>>", open_selected)
+
+    def show_tips():
+        win = new_window("Study tips")
+        tk.Label(win, text="Stuck? Pick a technique", font=("DejaVu Sans", 12, "bold"), bg=BG,
+                 fg=FG).pack(padx=20, pady=(14, 6))
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(padx=20)
+        text = tk.Label(win, font=("DejaVu Sans", 11), bg=PANEL, fg=FG, wraplength=340, justify="left",
+                        padx=14, pady=10, text="Try one of the buttons above.")
+        for label, mode in (("Explain simpler", "explain"), ("Easy examples", "example"), ("Quiz me", "quiz")):
+            tk.Button(buttons, text=label, width=14,
+                      command=lambda m=mode: text.config(text=study.study_tip(m)["text"])
+                      ).pack(side="left", padx=4)
+        text.pack(fill="x", padx=20, pady=(10, 6))
+        tk.Button(win, text="Close", width=10, command=win.destroy).pack(pady=(0, 14))
+
+    # --- study session controls ---
+    def whole_minutes(var, default):
+        try:
+            return int(var.get())
+        except ValueError:
+            return default
+
+    def start_study():
+        ok, message = study.start_session(subject_var.get(), goal_var.get(),
+                                          whole_minutes(work_var, 25), whole_minutes(break_var, 5))
+        if not ok:
+            messagebox.showinfo("Study Focus", message, parent=root)
+
+    def stop_study():
+        answer = messagebox.askyesnocancel("Study Focus", "Did you reach your goal?", parent=root)
+        if answer is None:
+            return
+        report = study.stop_session(answer)
+        if report:
+            show_report(report)
+
+    def toggle_phase():
+        sv = study.session_view()
+        if sv and sv["phase"] == "break":
+            study.resume_work()
+        elif sv:
+            study.start_break()
+
+    start_button.config(command=start_study)
+    stop_button.config(command=stop_study)
+    phase_button.config(command=toggle_phase)
+    history_button.config(command=show_history)
 
     # --- keys ---
     def handle_key(k):
@@ -1203,7 +1278,11 @@ def run_ui(fake_camera, global_keys, compact):
         running = False
         root.destroy()
 
-    root.bind("<Key>", lambda e: handle_key(e.keysym.lower()))
+    def on_key(e):
+        if not isinstance(e.widget, (tk.Entry, tk.Spinbox)):   # typing in the session fields is not a hotkey
+            handle_key(e.keysym.lower())
+
+    root.bind("<Key>", on_key)
     root.protocol("WM_DELETE_WINDOW", quit_app)
 
     # --- drawing helpers ---
@@ -1297,7 +1376,7 @@ def run_ui(fake_camera, global_keys, compact):
             rows["Study"].config(text=f"{sv['subject'][:18]} · {sv['phase']} {left // 60}:{left % 60:02d}"
                                       f" · {sv['pomodoros']} pomodoros")
         else:
-            rows["Study"].config(text="no session (start one in the dashboard)")
+            rows["Study"].config(text="no session (start one below)")
         if c["phone_status"] != "on" and not fake_camera:
             rows["Phone"].config(text=f"detector {c['phone_status']}")
         else:
@@ -1328,6 +1407,28 @@ def run_ui(fake_camera, global_keys, compact):
         draw_expressions(c["expression"], c["scores"])
         draw_index(session["index"])
         draw_timeline()
+        update_study_panel(sv)
+
+    def update_study_panel(sv):
+        """Swap between the start form and the running-session controls; refresh the profile line."""
+        want = run_row if sv else setup_row
+        if shown_row[0] is not want:
+            if shown_row[0]:
+                shown_row[0].pack_forget()
+            profile_row.pack_forget()
+            want.pack(fill="x")
+            profile_row.pack(fill="x", pady=(6, 0))
+            shown_row[0] = want
+        if sv:
+            left = sv["phase_left"]
+            goal = f" · goal: {sv['goal'][:30]}" if sv["goal"] else ""
+            run_label.config(text=f"{sv['subject'][:20]}{goal} · {sv['phase']} {left // 60}:{left % 60:02d}"
+                                  f" · {sv['pomodoros']} pomodoros · +{sv['xp']} XP")
+            phase_button.config(text="Resume" if sv["phase"] == "break" else "Break")
+        p = study.profile_view()
+        badges = ", ".join(b["name"] for b in p["badges"]) or "none yet"
+        profile_label.config(text=f"Level {p['level']} · {p['level_need'] - p['level_xp']} XP to next level · "
+                                  f"streak {p['streak']} day(s) · badges: {badges}")
 
     # --- main loop ---
     last = [time.monotonic()]
@@ -1351,7 +1452,6 @@ def run_ui(fake_camera, global_keys, compact):
             tick(dt)
             while events:
                 kind, message = events.pop(0)
-                publish(kind, message)
                 show_popup(kind, message)
             update_info()
         root.after(UI_REFRESH_MS, loop)

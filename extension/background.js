@@ -2,7 +2,6 @@
 // credentials), the page title, scrolling and idle state to the local engine, and shows the
 // focus-mode screen on distracting sites during a study session.
 const ENGINE = "http://127.0.0.1:8000";
-const DASHBOARD = ENGINE + "/";
 const IDLE_SECONDS = 60;
 const SWITCH_WINDOW_MS = 5 * 60 * 1000;
 const SCROLL_WINDOW_MS = 60 * 1000;
@@ -139,7 +138,7 @@ async function report(tabSwitched = false) {
     const [text, color] = BADGES[status.state] || ["", "#4a5568"];
     chrome.action.setBadgeText({ text });
     chrome.action.setBadgeBackgroundColor({ color });
-    chrome.action.setTitle({ title: `Study Focus: ${status.state} (index ${status.index}) - click for dashboard` });
+    chrome.action.setTitle({ title: `Study Focus: ${status.state} (index ${status.index})` });
 
     // focus mode: cover distracting sites during the work part of a study session
     if (tab && status.block && !(await isAllowed(domain))) {
@@ -169,7 +168,6 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 });
 chrome.windows.onFocusChanged.addListener(() => report());
 chrome.idle.onStateChanged.addListener(() => report());
-chrome.action.onClicked.addListener(() => chrome.tabs.create({ url: DASHBOARD }));
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg || !sender.tab) return;
@@ -177,7 +175,9 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     scrollLog.push({ t: Date.now(), tabId: sender.tab.id, px: msg.px || 0, swipes: msg.swipes || 0 });
     if (Date.now() - lastReport > 4000) report();
   } else if (msg.type === "leave") {
-    chrome.tabs.update(sender.tab.id, { url: DASHBOARD });
+    // back in history; a tab with no history goes to the new-tab page
+    const tabId = sender.tab.id;
+    chrome.tabs.goBack(tabId).catch(() => chrome.tabs.update(tabId, { url: "chrome://newtab/" }));
   } else if (msg.type === "allow" && msg.domain) {
     chrome.storage.local.get("allowUntil").then(({ allowUntil = {} }) => {
       allowUntil[msg.domain] = Date.now() + ALLOW_MS;

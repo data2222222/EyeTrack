@@ -110,7 +110,7 @@ class Store:
             self._save()
 
     def snapshot(self) -> list[dict[str, object]]:
-        """Rows for the dashboard cache inspector, newest first. Overrides win over cached rows."""
+        """Rows for a cache inspector, newest first. Overrides win over cached rows."""
         with self._lock:
             rows: dict[str, dict[str, object]] = {
                 key: {

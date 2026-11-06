@@ -1,7 +1,7 @@
 """
 Study sessions for Study Focus: Pomodoro timer, XP / levels / streaks / badges,
 end-of-session reports with tips, and built-in study tips for when you're stuck.
-The engine calls tick() twice per second; the dashboard talks to it through the engine's HTTP API.
+The engine calls tick() twice per second; the engine window starts and stops sessions and shows the views below.
 """
 import datetime
 import json
@@ -290,7 +290,7 @@ def build_report(s, goal_done, now):
     return report
 
 
-# ---------------- views for the dashboard ----------------
+# ---------------- views for the window ----------------
 def session_view():
     with lock:
         s = session
