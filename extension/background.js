@@ -1,11 +1,14 @@
-// Study Focus Collector: reports the active domain (never the full URL), scrolling and idle state
-// to the local engine, and shows the focus-mode screen on distracting sites during a study session.
+// Study Focus Collector: reports the active domain, a sanitized URL path (no query, fragment or
+// credentials), the page title, scrolling and idle state to the local engine, and shows the
+// focus-mode screen on distracting sites during a study session.
 const ENGINE = "http://127.0.0.1:8000";
 const DASHBOARD = ENGINE + "/";
 const IDLE_SECONDS = 60;
 const SWITCH_WINDOW_MS = 5 * 60 * 1000;
 const SCROLL_WINDOW_MS = 60 * 1000;
 const ALLOW_MS = 5 * 60 * 1000;      // "Continue anyway" lasts 5 minutes per site
+const MAX_PATH_SEGMENTS = 3;
+const MAX_TITLE_CHARS = 200;
 
 const PRODUCTIVE = [
   "github.com", "gitlab.com", "stackoverflow.com", "stackexchange.com", "notion.so",
@@ -42,6 +45,18 @@ function domainOf(url) {
     return u.hostname.replace(/^www\./, "");
   } catch {
     return "unknown";
+  }
+}
+
+// "youtube.com/watch": host + at most 3 path segments. Query, fragment and credentials never leave.
+function sanitizePath(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    const segments = u.pathname.split("/").filter(Boolean).slice(0, MAX_PATH_SEGMENTS);
+    return [u.hostname.replace(/^www\./, ""), ...segments].join("/");
+  } catch {
+    return "";
   }
 }
 
@@ -95,9 +110,17 @@ async function report(tabSwitched = false) {
     }
   }
 
+  // incognito tabs: domain/category only, no path or title (the engine never sends them anywhere)
+  const incognito = !!(tab && tab.incognito);
+  const pageInfo = tab && !incognito && category !== "other"
+    ? { path: sanitizePath(tab.url || ""), title: (tab.title || "").slice(0, MAX_TITLE_CHARS) }
+    : {};
+
   const payload = {
     domain,
     category,
+    incognito,
+    ...pageInfo,
     idle: await chrome.idle.queryState(IDLE_SECONDS),
     switches: await recentSwitches(tabSwitched),
     scroll_px: scroll.px,

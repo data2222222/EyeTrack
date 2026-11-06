@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Study Focus Collector",
-  "version": "2.0",
-  "description": "Sends the active site's domain, scrolling and browser activity to the local Study Focus engine. Shows a focus screen on distracting sites during study sessions.",
+  "version": "2.1",
+  "description": "Sends the active site's domain, URL path (no query), page title, scrolling and browser activity to the local Study Focus engine. Shows a focus screen on distracting sites during study sessions.",
   "permissions": ["tabs", "activeTab", "idle", "storage", "alarms"],
   "host_permissions": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"],
   "background": { "service_worker": "background.js" },
