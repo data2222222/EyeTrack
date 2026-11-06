@@ -7,7 +7,7 @@
   "host_permissions": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
-    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_idle" }
+    { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_start" }
   ],
   "action": { "default_title": "Study Focus" }
 }

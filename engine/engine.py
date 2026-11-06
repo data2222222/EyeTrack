@@ -576,15 +576,21 @@ def category_text(b):
 
 
 def snapshot():
+    """State returned to the extension. The block_* fields drive its focus screen."""
     with lock:
         snap = {"state": session["state"], "index": session["index"],
                 "domain": browser["domain"], "category": browser["category"],
+                "category_source": browser["category_source"],
+                "category_confidence": browser["category_confidence"],
                 "camera": camera_text(), "expression": camera["expression"]}
     sv = study.session_view()
     snap["focus_mode"] = bool(sv and sv["phase"] == "work")
     snap["block"] = snap["focus_mode"] and snap["category"] == "distraction"
     snap["subject"] = sv["subject"] if sv else ""
     snap["goal"] = sv["goal"] if sv else ""
+    snap["block_left"] = sv["phase_left"] if snap["focus_mode"] else 0      # seconds left in the work block
+    snap["block_total"] = sv["phase_total"] if snap["focus_mode"] else 0
+    snap["skips"] = sv["counts"]["override"] if sv else 0                    # "Give me 5 min" this session
     return snap
 
 

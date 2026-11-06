@@ -15,7 +15,7 @@ Two parts:
 ```bash
 python setup.py        # python3 setup.py on macOS/Linux
 ```
-One script, safe to re-run. It checks Python (3.10 to 3.12) and creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
+One script, safe to re-run. It checks Python (3.10 to 3.14) and creates `engine/.venv`, installs the dependencies, downloads the models, optionally stores your Jev API key (Enter to skip), checks the extension files, then opens `chrome://extensions` with the extension folder path on your clipboard and the folder open in your file manager. It waits until the extension reports in ("Extension connected") and offers to start the app. Flags: `--no-input`, `--skip-models`, `--skip-extension`, `--start`.
 
 **The one manual step** (Chrome does not allow installing an extension silently): on the page that opens, turn on **Developer mode** (top right), click **Load unpacked**, paste the path (Ctrl+L, or Cmd+Shift+G on macOS) or pick the folder that opened.
 
@@ -38,7 +38,7 @@ Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > sele
 
 ## Platforms
 
-Windows, macOS and Linux run the same code (CI tests all three on Python 3.11 and 3.12). Use Python 3.10 to 3.12: the `mediapipe` wheels do not cover newer versions yet.
+Windows, macOS and Linux run the same code (CI tests all three on Python 3.12). Use Python 3.10 to 3.14.
 
 - **Windows**: camera via DirectShow; Qt supplies the desktop interface.
 - **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.
@@ -60,7 +60,7 @@ The camera starts only for camera-enabled work and is stopped/joined on pause, b
 
 Reports are saved locally in `engine/data/sessions.json`; older reports are preserved. The UI shows the focus score described above, but no mood, XP or streaks. Website and camera categories each describe active time independently. Missing/stale camera observations are unavailable after one second. Browser observation freshness still follows the existing collector's heartbeat; improving event-boundary accounting is a remaining browser task.
 
-The extension's existing focus overlay is an intervention, not navigation blocking. User domain settings, return-to-work behavior and overlay cleanup remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
+**Focus screen (extension):** during a work block, a distracting site is covered by a screen showing the time left in the block, your goal, and who called the site a distraction (`Jev 0.97`, `Jev, cached` or `site list`). **Back to studying** goes back in the tab's history (or to a new tab); **Give me 5 min** unlocks after 10 s, allows that site for 5 minutes and is counted as a skip, shown on the screen. While it is up, keys, scrolling and media playback do not reach the page. It disappears by itself when the block ends, and within 30 s (the extension's heartbeat) when you pause, take a break or end the session. It is an intervention, not navigation blocking. User domain settings remain browser-integration work. Loud strict-mode alarms are not implemented in this interface change.
 
 ## Goal-aware classification (Jev)
 

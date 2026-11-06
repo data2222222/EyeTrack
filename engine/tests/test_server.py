@@ -38,6 +38,19 @@ def test_post_activity_returns_state(server):
     assert "state" in data
 
 
+def test_block_reply_carries_focus_screen_fields(server, monkeypatch, tmp_path):
+    study = engine.study
+    monkeypatch.setattr(study, "session", None)
+    monkeypatch.setattr(study, "REPORTS_PATH", str(tmp_path / "sessions.json"))
+    assert study.start_session("Physics", "capacitors", work_min=25)[0]
+    study.record_event("override")
+    body = json.dumps({"domain": "reddit.com", "category": "distraction", "idle": "active"})
+    data = request(server, "POST", "/activity", body, {"Content-Type": "application/json"})[1]
+    assert data["block"] and data["category_source"] == "list"
+    assert data["block_total"] == 1500 and 1490 <= data["block_left"] <= 1500
+    assert data["skips"] == 1
+
+
 def test_get_status_ok_and_root_404(server):
     assert request(server, "GET", "/status")[0] == 200
     assert request(server, "GET", "/")[0] == 404

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-command setup for Study Focus: python setup.py   (python3 setup.py on macOS/Linux)
 
-Stdlib only, so it runs on any system Python 3.10 to 3.12. Safe to re-run: finished steps are skipped.
+Stdlib only, so it runs on any system Python 3.10 to 3.14. Safe to re-run: finished steps are skipped.
 Chrome does not allow installing an unpacked extension silently, so the one manual part is Chrome's
 own Developer mode toggle + "Load unpacked"; this script opens the right page and puts the folder
 path on your clipboard.
@@ -29,7 +29,7 @@ VENV_DIR = ENGINE_DIR / ".venv"
 CONFIG_PATH = ENGINE_DIR / "data" / "config.json"
 PORT = 8000
 EXTENSION_WAIT_SECONDS = 5 * 60
-SUPPORTED = ((3, 10), (3, 12))  # mediapipe wheels
+SUPPORTED = ((3, 10), (3, 14))  # every dependency ships wheels for this range
 
 OK, WARN, FAIL = "[ok]", "[!]", "[x]"
 
@@ -155,7 +155,7 @@ def step_python() -> bool:
     version = sys.version_info[:2]
     label = f"{version[0]}.{version[1]}"
     if not python_ok(version):
-        say(FAIL, f"Python {label} is not supported (need 3.10 to 3.12; mediapipe has no wheels for other versions).")
+        say(FAIL, f"Python {label} is not supported (need 3.10 to 3.14).")
         print("    " + python_help(sys.platform))
         return False
     say(OK, f"Python {label}")
