@@ -650,8 +650,8 @@ def read_expression(bs):
     return label, scores
 
 
-def gaze_direction(gaze_h, gaze_v):
-    _, bounds = calib.profile()
+def gaze_direction(gaze_h, gaze_v, size=None):
+    _, bounds = calib.profile(size)
     (lo_h, hi_h), (lo_v, hi_v) = bounds[2:]
     parts = []
     if gaze_v > hi_v:
@@ -665,25 +665,21 @@ def gaze_direction(gaze_h, gaze_v):
     return "-".join(parts) if parts else "center"
 
 
-def head_or_eyes_down(pitch, gaze_h, gaze_v):
+def head_or_eyes_down(pitch, gaze_h, gaze_v, size=None):
     """Head tipped or eyes lowered past the calibrated screen area (reading paper, a desk, a lap)."""
-    _, bounds = calib.profile()
-    return pitch > bounds[1][1] or "down" in gaze_direction(gaze_h, gaze_v)
+    _, bounds = calib.profile(size)
+    return pitch > bounds[1][1] or "down" in gaze_direction(gaze_h, gaze_v, size)
 
 
-def attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed):
-    """Is the user looking at the screen? Returns (bool, reason)."""
+def attention(nose, yaw, pitch, gaze_h, gaze_v, eyes_closed, size=None):
+    """Is the user looking at the screen? Returns (bool, reason).
+
+    size is the apparent face (width, height); sitting closer widens the limits.
+    """
     if eyes_closed:
         return False, "eyes closed"
-    _, bounds = calib.profile()
-    if not bounds[0][0] <= yaw <= bounds[0][1]:
-        return False, "head turned away"
-    if not bounds[1][0] <= pitch <= bounds[1][1]:
-        return False, "head tilted"
-    direction = gaze_direction(gaze_h, gaze_v)
-    if direction != "center":
-        return False, f"eyes looking {direction}"
-    return True, "eyes on screen"
+    center, bounds = calib.profile(size)
+    return tracking.screen_attention((yaw, pitch, gaze_h, gaze_v), center, bounds)
 
 
 def reset_calibration(guided=False):
@@ -726,8 +722,10 @@ def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
     smoother = st.setdefault("filter", tracking.AttentionFilter())
     quality = tracking.landmark_quality(lm, aspect)
     yaw, pitch, gaze_h, gaze_v = camera["yaw"], camera["pitch"], camera["gaze_h"], camera["gaze_v"]
+    size = None
     if quality is None:
         try:
+            size = tracking.face_size(lm, aspect)
             nose, yaw, pitch = head_pose(lm, aspect)
             if not eyes_closed:
                 gaze_h, gaze_v = eye_gaze(lm, bs, aspect)
@@ -748,13 +746,13 @@ def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
         values = (yaw, pitch, gaze_h, gaze_v)
         # Either eyelid closing makes the iris position unsuitable for calibration.
         if max(bs.get("eyeBlinkLeft", 0), bs.get("eyeBlinkRight", 0)) < .35:
-            calib.add(values, stamp)
-        yaw, pitch, gaze_h, gaze_v = smoother.smooth(values, stamp)
+            calib.add(values, stamp, size)
+        yaw, pitch, gaze_h, gaze_v, *size = smoother.smooth(values + size, stamp)
         state = calib.view()
         if state["active"]:
             facing, reason = True, "calibrating: " + state["message"]
         else:
-            looking, detail = attention(nose, yaw, pitch, gaze_h, gaze_v, False)
+            looking, detail = attention(nose, yaw, pitch, gaze_h, gaze_v, False, size)
             facing, reason = smoother.update(looking, detail, stamp)
     expression_votes.append(label)
     expression = collections.Counter(expression_votes).most_common(1)[0][0]
@@ -763,10 +761,10 @@ def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
         expression_log.append((now, expression))
         camera.update(present=True, facing=facing, reason=reason, yaw=yaw, pitch=pitch,
                       gaze_h=gaze_h, gaze_v=gaze_v,
-                      gaze_text="uncertain" if quality else ("closed" if eyes_closed else gaze_direction(gaze_h, gaze_v)),
+                      gaze_text="uncertain" if quality else ("closed" if eyes_closed else gaze_direction(gaze_h, gaze_v, size)),
                       eyes_closed=eyes_closed, closed_since=st["closed_since"],
                       expression=expression, scores=scores, last_seen=now,
-                      looking_down=not quality and not eyes_closed and head_or_eyes_down(pitch, gaze_h, gaze_v))
+                      looking_down=not quality and not eyes_closed and head_or_eyes_down(pitch, gaze_h, gaze_v, size))
     return facing, reason
 
 

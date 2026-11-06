@@ -183,6 +183,94 @@ def test_attention_hysteresis_ignores_short_jitter_and_detects_sustained_away(fp
     assert smoother.update(True, "screen", 2.2) == (True, "screen")
 
 
+def test_yaw_uses_image_left_to_right_like_eye_gaze():
+    lm = face()
+    lm[1] = Point(x=.6, y=.5)
+    mirrored = face()
+    mirrored[1] = Point(x=.6, y=.5)
+    mirrored[234], mirrored[454] = mirrored[454], mirrored[234]
+    assert tracking.head_pose(lm)[1] == pytest.approx(.7)
+    assert tracking.head_pose(mirrored)[1] == pytest.approx(.7)
+
+
+def test_turned_head_trusts_the_nearer_eye_instead_of_rejecting_gaze():
+    lm = face(.7)
+    # The far eye is foreshortened by the head turn and its iris estimate is poor.
+    lm[362], lm[263], lm[473] = Point(x=.58, y=.4), Point(x=.64, y=.4), Point(x=.645, y=.41)
+    assert tracking.eye_gaze(lm, {})[0] == pytest.approx(.7)
+    lm[473] = Point(x=.70, y=.41)  # far iris outside its eye
+    assert tracking.eye_gaze(lm, {})[0] == pytest.approx(.7)
+
+
+def test_consistent_eyes_are_weighted_toward_the_nearer_eye():
+    lm = face()
+    lm[362], lm[263] = Point(x=.58, y=.4), Point(x=.64, y=.4)
+    lm[468], lm[473] = Point(x=.32 + .12 * .6, y=.41), Point(x=.58 + .06 * .45, y=.41)
+    assert tracking.eye_gaze(lm, {})[0] == pytest.approx((.6 * .12 + .45 * .06) / .18)
+
+
+def test_slightly_clipped_face_outline_is_tolerated_but_clipped_eyes_are_not():
+    lm = face()
+    lm[152] = Point(x=.5, y=1.02)
+    assert tracking.landmark_quality(lm) is None
+    lm[152] = Point(x=.5, y=1.1)
+    assert tracking.landmark_quality(lm) == "keep your whole face in view"
+    lm = face()
+    lm[33] = Point(x=-.01, y=.4)
+    assert tracking.landmark_quality(lm) == "keep your whole face in view"
+
+
+def test_sitting_closer_widens_limits_but_farther_never_narrows_them():
+    calibration = tracking.Calibration()
+    values = (.5, .5, .5, 0)
+    now = 0
+    while calibration.view()["active"]:
+        calibration.add(values, now, (.4, .5))
+        now += 1 / 15
+    assert calibration.size == pytest.approx((.4, .5))
+    base = calibration.profile()[1]
+    assert calibration.profile((.3, .4))[1] == base
+    # Head turned (narrower) while closer (taller): the height still shows proximity.
+    closer = calibration.profile((.36, .6))[1]
+    for (lo, hi), (clo, chi), c in zip(base, closer, values):
+        assert clo == pytest.approx(c - (c - lo) * 1.2)
+        assert chi == pytest.approx(c + (hi - c) * 1.2)
+    capped = calibration.profile((2, 2))[1]
+    assert capped[2][1] == pytest.approx(.5 + .10 * tracking.MAX_PROXIMITY_SCALE)
+
+
+def test_guided_calibration_reaches_the_real_screen_edge_beyond_the_dots():
+    calibration = tracking.Calibration()
+    calibration.start(guided=True)
+    points = ((.50, .5, .5, 0), (.47, .5, .31, 0), (.53, .5, .69, 0),
+              (.5, .47, .5, -.5), (.5, .53, .5, .55))
+    now = 0
+    for values in points:
+        now = collect(calibration, values, now)
+    center, bounds = calibration.profile()
+    # Looking at the actual top-right corner needs ~19% more than the inset dots.
+    corner = (.5, .5, .5 + .19 * tracking.EDGE_REACH, -.5 * tracking.EDGE_REACH)
+    assert tracking.screen_attention(corner, center, bounds) == (True, "eyes on screen")
+    assert not tracking.screen_attention((.5, .5, .85, 0), center, bounds)[0]
+
+
+@pytest.mark.parametrize("values, expected", [
+    ((.5, .5, .5, 0), (True, "eyes on screen")),
+    ((.5, .62, .5, -.2), (True, "eyes on screen")),           # head down, eyes up
+    ((.68, .5, .44, 0), (True, "eyes on screen")),            # head right, eyes left
+    ((.5, .62, .5, .2), (False, "head tilted")),              # head and eyes down
+    ((.5, .62, .5, 0), (False, "head tilted")),
+    ((.5, .75, .5, -.7), (False, "head tilted")),             # beyond compensation
+    ((.5, .5, .5, -.5), (False, "eyes looking up")),
+    ((.5, .5, .65, -.5), (False, "eyes looking up-right")),
+    ((.85, .5, .4, 0), (False, "head turned away")),          # beyond compensation
+])
+def test_head_and_eyes_can_compensate_each_other(values, expected):
+    center = tracking.DEFAULT_CENTER
+    bounds = tuple((c - t, c + t) for c, t in zip(center, tracking.TOLERANCES))
+    assert tracking.screen_attention(values, center, bounds) == expected
+
+
 @pytest.fixture
 def runtime(monkeypatch):
     monkeypatch.setattr(engine, "camera", dict(engine.camera))
@@ -249,6 +337,26 @@ def test_face_loss_clears_expression_timers_filters_and_calibration(runtime):
 def test_off_center_seating_is_not_looking_away(runtime):
     collect(engine.calib, (.5, .5, .5, 0))
     assert engine.attention(Point(x=.15, y=.5), .5, .5, .5, 0, False) == (True, "eyes on screen")
+
+
+def test_leaning_close_to_look_at_the_top_right_edge_stays_on_screen(runtime):
+    clock, st, expressions = runtime
+    looking_up = {"eyeLookUpLeft": .4, "eyeLookUpRight": .4}
+
+    def observe(lm, blendshapes, frames):
+        results = []
+        for _ in range(frames):
+            clock[0] += 1 / 15
+            results.append(engine.analyze_face(lm, blendshapes, st, expressions)[0])
+        return results
+
+    observe(face(), {}, 60)  # automatic center calibration at a normal distance
+    assert engine.calib.view()["calibrated"]
+    # The same eye rotation is past the edge from the calibrated distance...
+    assert not observe(face(.62), looking_up, 15)[-1]
+    # ...but reaches only the top-right edge when leaning in close.
+    # (The first frames only settle smoothing and the return-to-screen hysteresis.)
+    assert all(observe(transformed(face(.62), scale=1.4, dy=.02), looking_up, 15)[5:])
 
 
 def test_bad_iris_reports_uncertainty_without_learning_it(runtime):
