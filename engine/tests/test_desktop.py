@@ -179,3 +179,58 @@ def test_summary_reports_score_and_attention(window):
     assert w.summary_score.text() == "100"
     assert w.summary_attention.isVisibleTo(w)
     assert w.report["score"] == 100
+
+
+def test_distracting_app_alert_counts_shows_popup_and_reports_apps(window):
+    w, clock = window
+    snapshot = {"processes": {1: "code", 3: "discord"}, "front": 1}
+    monitor = engine.appmonitor.AppMonitor(
+        scanner=lambda: engine.appmonitor.Snapshot(snapshot["processes"], snapshot["front"]),
+        clock=lambda: clock[0], own_pid=-1)
+    engine.app_monitor = monitor
+    try:
+        w.start_button.click()
+        monitor.refresh()
+        clock[0] += 1
+        w.refresh()
+        assert w.app_alert is None
+        snapshot["front"] = 3
+        monitor.refresh()
+        clock[0] += 1
+        w.refresh()
+        assert w.app_alert is not None and "Discord" in w.app_alert.text()
+        assert study.session_view()["counts"]["app"] == 1
+        assert w.fact_apps.text() == "1 app alert"
+        assert study.session_view()["counts"]["nudge"] == 0
+        clock[0] += 3
+        w.refresh()
+        w.pause_button.click()                           # pausing dismisses the popup
+        assert w.app_alert is None
+        w.pause_button.click()
+        assert w.end_session(confirm=False)
+        assert w.summary_apps.isVisibleTo(w)
+        apps = {a["name"]: a for a in w.report["apps"]}
+        assert apps["discord"]["distracting"] and not apps["code"]["distracting"]
+        assert w.report["app_distraction_seconds"] > 0
+    finally:
+        engine.app_monitor = None
+
+
+def test_events_outside_work_are_dropped_not_queued(window):
+    w, clock = window
+    w.start_button.click()
+    w.take_break()
+    engine.emit("appblock", "Discord is in front.")
+    w.refresh()
+    assert w.app_alert is None and not engine.events
+    w.pause_button.click()
+    w.refresh()
+    assert w.app_alert is None
+
+
+def test_summary_without_app_data_hides_the_apps_card(window):
+    w, clock = window
+    w.start_button.click()
+    clock[0] += 5
+    assert w.end_session(confirm=False)
+    assert not w.summary_apps.isVisibleTo(w)

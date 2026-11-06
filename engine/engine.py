@@ -33,17 +33,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Optional for app monitoring; the rest of the engine remains importable if an
-# optional platform dependency is unavailable.
-try:
-    import psutil
-except ImportError:
-    psutil = None
-try:
-    import pygetwindow
-except ImportError:
-    pygetwindow = None
-
+import appmonitor
 import phone_detection
 import study
 import tracking
@@ -61,11 +51,6 @@ EYE_REST_SECONDS = 20
 INDEX_WINDOW_SECONDS = 10 * 60   # Productivity Index = weighted average over this window
 SCATTERED_SWITCHES = 15          # tab switches in 5 min that count as "scattered"
 EXTENSION_STALE_SECONDS = 75     # extension heartbeat is every 30 s
-
-# App checks run on a worker thread so process enumeration cannot stall the UI
-# or camera path. Tokens match process names/executable names case-insensitively.
-APP_BLACKLIST = ["roblox", "tlauncher", "javaw", "steam", "discord"]
-APP_MONITOR_INTERVAL = 1.0
 
 CAMERA_INDEX = 0
 CAMERA_FPS = 15                  # high enough to catch blinks
@@ -141,7 +126,6 @@ STATE_COLORS = {
     "Starting": "#4a5568",
 }
 POPUP_STYLE = {  # kind: (title, color)
-    "appblock": ("Distracting app detected", "#b3261e"),
     "nudge": ("Focus check", "#b3261e"),
     "break": ("Eye-rest break", "#1d6b7a"),
     "tired": ("Feeling tired?", "#5b3a8a"),
@@ -156,10 +140,7 @@ EXPRESSION_NAMES = ["Smile", "Frown", "Brow down", "Brow raise", "Jaw open", "Ey
 lock = threading.Lock()
 running = True
 camera_controller = None
-app_monitor_stop = threading.Event()
-app_monitor_worker = None
-app_monitor_previous_running = set()
-app_monitor_previous_foreground = set()
+app_monitor = None                    # appmonitor.AppMonitor while the engine runs
 show_preview = True
 browser = {"domain": "waiting for extension", "category": "neutral", "idle": "active",
            "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False,
@@ -195,84 +176,6 @@ demo_requests = []                    # filled by global hotkeys (other thread)
 def emit(kind, message):
     """Queue a popup for the window."""
     events.append((kind, message))
-
-
-# ---------------- desktop app monitoring / distraction alerts ----------------
-def _matching_blacklist(text):
-    """Return blacklist tokens contained in a process name, path, or window title."""
-    haystack = (text or "").casefold()
-    return [token for token in APP_BLACKLIST if token.casefold() in haystack]
-
-
-def check_blocklisted_apps():
-    """Return matching process identities and blacklist tokens in the active title."""
-    running_matches = set()  # (pid, process name, matching blacklist token)
-    foreground_matches = set()
-    if psutil is not None:
-        try:
-            for proc in psutil.process_iter(["name", "exe"]):
-                try:
-                    info = proc.info
-                    process_name = info.get("name") or os.path.basename(info.get("exe") or "")
-                    text = " ".join((process_name, info.get("exe") or ""))
-                    for token in _matching_blacklist(text):
-                        running_matches.add((proc.pid, process_name, token))
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
-        except Exception as exc:
-            print(f"Process scan unavailable ({type(exc).__name__}).")
-
-    if pygetwindow is not None:
-        try:
-            window = pygetwindow.getActiveWindow()
-            if window is not None:
-                foreground_matches.update(_matching_blacklist(getattr(window, "title", "")))
-        except Exception:
-            pass  # Process scanning remains available if foreground lookup fails.
-    return running_matches, foreground_matches
-
-
-def app_monitor_loop(stop_event):
-    """Alert on newly running or foreground blacklisted apps; allow break time."""
-    global app_monitor_previous_running, app_monitor_previous_foreground
-    while running and not stop_event.is_set():
-        view = study.session_view()
-        if view and view.get("phase") == "break":
-            # Defer checks during breaks; apps still open are detected when work resumes.
-            stop_event.wait(APP_MONITOR_INTERVAL)
-            continue
-
-        running_apps, foreground_apps = check_blocklisted_apps()
-        newly_running = running_apps - app_monitor_previous_running
-        newly_foreground = foreground_apps - app_monitor_previous_foreground
-        newly_running_tokens = {token for _, _, token in newly_running}
-        for pid, process_name, token in sorted(newly_running):
-            emit("appblock", f"Detected process '{process_name}' (PID {pid}); its name matches '{token}'.\n"
-                             "Close it and return to your task.")
-        for token in sorted(newly_foreground - newly_running_tokens):
-            emit("appblock", f"'{token}' is in the foreground. Close it and return to your task.")
-        app_monitor_previous_running = running_apps
-        app_monitor_previous_foreground = foreground_apps
-        stop_event.wait(APP_MONITOR_INTERVAL)
-
-
-def start_app_monitor():
-    """Start the app monitor without blocking the UI or webcam loop."""
-    global app_monitor_worker
-    if psutil is None and pygetwindow is None:
-        print("App monitoring unavailable; install psutil and pygetwindow from requirements.txt.")
-        return
-    app_monitor_stop.clear()
-    app_monitor_worker = threading.Thread(target=app_monitor_loop, args=(app_monitor_stop,),
-                                          name="app-monitor", daemon=True)
-    app_monitor_worker.start()
-
-
-def stop_app_monitor():
-    """Stop and join the app monitor during shutdown."""
-    app_monitor_stop.set()
-    if app_monitor_worker is not None:
-        app_monitor_worker.join(timeout=2.0)
 
 
 def assess(category, idle, switches, present, facing, missing_seconds, on_phone=False, doom=False):
@@ -385,6 +288,12 @@ def tick(dt):
     sv = study.session_view()
     on_break = not bool(sv and sv["phase"] == "work")
 
+    # desktop apps: foreground app time plus alerts for distracting apps (work phase only)
+    app_info, app_alerts = app_monitor.observe(not on_break) if app_monitor else ({}, [])
+    for message in app_alerts:
+        study.record_event("app")
+        emit("appblock", message)
+
     # doom-scrolling: lots of scrolling / short videos on a non-study site, sustained
     if is_doom_scrolling(b, now):
         session["doom_streak"] += dt
@@ -413,7 +322,8 @@ def tick(dt):
             "browser_age": max(0, now - b["updated"]) if b["updated"] else None,
             "camera_category": ("present" if c["present"] else "no_face") if c["status"] == "ok" else "unavailable",
             "camera_observed_at": c.get("observed_at"),
-            "attention": tracking.attention_bucket(c, sv["mode"] if sv else "pc", time.monotonic(), on_phone)}):
+            "attention": tracking.attention_bucket(c, sv["mode"] if sv else "pc", time.monotonic(), on_phone),
+            **app_info}):
         emit(kind, message)
 
     sv = study.session_view()
@@ -1821,7 +1731,7 @@ def run_ui(fake_camera=False, global_keys=False, compact=False):
 
 
 def main():
-    global running, camera_controller
+    global running, camera_controller, app_monitor
     parser = argparse.ArgumentParser(description="EyeTrack desktop focus sessions")
     parser.add_argument("--no-camera", action="store_true", help="simulate camera input for testing")
     parser.add_argument("--compact", action="store_true", help="use a smaller desktop window")
@@ -1839,12 +1749,14 @@ def main():
         return
     print(f"Engine listening on http://127.0.0.1:{server.server_address[1]}  (GET /status)")
     camera_controller = CameraController(args.camera_index, args.no_camera)
-    start_app_monitor()
+    app_monitor = appmonitor.AppMonitor(
+        watchlist=appmonitor.load_watchlist(os.path.join(study.DATA_DIR, "config.json")))
+    app_monitor.start()
     try:
         run_ui(args.no_camera, False, args.compact)
     finally:
         running = False
-        stop_app_monitor()
+        app_monitor.stop()
         camera_controller.stop()
         server.shutdown()
         server.server_close()

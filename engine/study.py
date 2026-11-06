@@ -21,6 +21,7 @@ SCORE_WINDOW = 300                              # seconds of active time behind 
 TRACE_STEP = 10                                 # seconds of active time per trend-graph point
 MIN_TRACKED = 5                                 # tracked seconds needed before a score is shown
 AWAY_EPISODE_SECONDS = 3                        # looking away this long counts as one look-away
+REPORT_APPS = 8                                 # most-used desktop apps kept in a saved report
 lock = threading.RLock()
 session = None
 last_report = None
@@ -72,11 +73,11 @@ def start_session(subject="", goal="", work_min=25, break_min=5,
             "work_min": work_min, "break_min": break_min, "phase": "work",
             "cursor": now, "active": 0.0, "paused": 0.0, "break_seconds": 0.0,
             "current_break": 0.0, "break_count": 0, "breaks": [],
-            "counts": {"nudge": 0, "phone": 0, "doom": 0, "override": 0},
+            "counts": {"nudge": 0, "phone": 0, "doom": 0, "override": 0, "app": 0},
             "website": dict.fromkeys(WEBSITE_CATEGORIES, 0.0),
             "camera": dict.fromkeys(CAMERA_CATEGORIES, 0.0),
             "focus": dict.fromkeys(ATTENTION, 0.0), "recent": collections.deque(),
-            "trace": {}, "tracked": 0.0, "on_task": 0.0, "look_aways": 0,
+            "apps": {}, "app_distraction": 0.0, "trace": {}, "tracked": 0.0, "on_task": 0.0, "look_aways": 0,
             "now": "unavailable", "now_since": now, "away_since": None, "away_counted": False,
             "info": {}, "completed": False, "completion_announced": False,
         }
@@ -107,6 +108,15 @@ def _attribute(s, start, end):
     att_fresh = max(0.0, min(end, info.get("attention_until", start)) - start)
     s["focus"][bucket] += att_fresh
     s["focus"]["unavailable"] += duration - att_fresh
+    # Desktop apps are a separate observation: they never change the focus score.
+    app = info.get("app")
+    app_fresh = max(0.0, min(end, info.get("app_until", start)) - start)
+    if app and app_fresh > 0:
+        entry = s["apps"].setdefault(str(app)[:40], {"seconds": 0.0, "distracting": False})
+        entry["seconds"] += app_fresh
+        entry["distracting"] = entry["distracting"] or bool(info.get("app_distracting"))
+        if info.get("app_distracting"):
+            s["app_distraction"] += app_fresh
     # Focus score: share of tracked time spent on task. Without a camera only the site counts.
     if s["camera_enabled"]:
         tracked = att_fresh
@@ -123,6 +133,13 @@ def _attribute(s, start, end):
         slot = s["trace"].setdefault(int((s["active"] + duration / 2) // TRACE_STEP), [0.0, 0.0])
         slot[0] += tracked
         slot[1] += on
+
+
+def _top_apps(s):
+    """Most-used apps first, as report-friendly rows."""
+    ranked = sorted(s["apps"].items(), key=lambda item: -item[1]["seconds"])[:REPORT_APPS]
+    return [{"name": name, "seconds": entry["seconds"], "distracting": entry["distracting"]}
+            for name, entry in ranked]
 
 
 def _score(tracked, on):
@@ -248,6 +265,8 @@ def tick(dt, info):
             "camera_until": observed_at + 1 if observed_at is not None else now,
             "attention": info.get("attention", "unavailable"),
             "attention_until": observed_at + 1 if observed_at is not None else now,
+            "app": info.get("app"), "app_distracting": bool(info.get("app_distracting")),
+            "app_until": info.get("app_until", now) if info.get("app") else now,
         }
         if session["phase"] == "work":
             _track_now(session, session["info"]["attention"] if session["info"]["attention_until"] > now
@@ -278,7 +297,8 @@ def session_view():
             "break_planned": s["break_min"] * 60, "website": dict(s["website"]),
             "focus": dict(s["focus"]), "score": _recent_score(s),
             "session_score": _score(s["tracked"], s["on_task"]), "trace": _trace(s),
-            "look_aways": s["look_aways"], "now": s["now"],
+            "look_aways": s["look_aways"], "apps": _top_apps(s),
+            "app_distraction_seconds": s["app_distraction"], "now": s["now"],
             "now_seconds": max(0.0, time.monotonic() - s["now_since"]),
         }
 
@@ -304,6 +324,7 @@ def stop_session(goal_done=None):
             "website": dict(s["website"]), "camera": dict(s["camera"]),
             "focus": dict(s["focus"]), "score": _score(s["tracked"], s["on_task"]),
             "trace": _trace(s), "look_aways": s["look_aways"],
+            "apps": _top_apps(s), "app_distraction_seconds": s["app_distraction"],
         }
         save_json(REPORTS_PATH, [*reports, report])
         reports.append(report)
