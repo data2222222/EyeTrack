@@ -4,7 +4,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import engine
 import study
@@ -55,6 +55,89 @@ def test_setup_is_camera_off_and_goal_is_optional(window):
     assert study.session_view()["break_planned"] == 3 * 60
     assert study.session_view()["goal"] == ""
     assert engine.camera_controller.enabled
+
+
+def test_wellbeing_readout_is_quiet_and_survives_hidden_preview(window):
+    w, clock = window
+    w.start_button.click()
+    view = study.session_view()
+    camera = dict(engine.camera, wellbeing={"blinks": 12, "yawns": 1, "state": "possible",
+                                           "observed_at": clock[0]})
+    w.controller.simulated = False
+    w.refresh_wellbeing(view, camera, clock[0])
+    assert w.wellbeing_status.isVisibleTo(w)
+    assert w.wellbeing_status.text() == "12 blinks · 1 yawn · Sleepiness: possible signs"
+    assert w.wellbeing_status.objectName() == "wellbeing"
+    assert "not a diagnosis" in w.wellbeing_status.toolTip()
+    w.preview_hidden = True
+    w.refresh_wellbeing(view, camera, clock[0])
+    assert w.wellbeing_status.isVisibleTo(w)
+    assert study.session_view() == view
+    assert not engine.events
+    assert not w.checkin_visible
+
+
+@pytest.mark.parametrize("phase", ["paused", "break", "complete"])
+def test_wellbeing_readout_hides_outside_work(window, phase):
+    w, clock = window
+    w.start_button.click()
+    w.controller.simulated = False
+    w.refresh_wellbeing(dict(study.session_view(), phase=phase), engine.camera, clock[0])
+    assert not w.wellbeing_status.isVisibleTo(w)
+
+
+def test_wellbeing_readout_hides_for_camera_free_or_simulated_sessions(window):
+    w, clock = window
+    w.start_button.click()
+    assert not w.wellbeing_status.isVisibleTo(w)
+    w.controller.simulated = False
+    w.refresh_wellbeing(dict(study.session_view(), camera_enabled=False), engine.camera, clock[0])
+    assert not w.wellbeing_status.isVisibleTo(w)
+
+
+@pytest.mark.parametrize("reason", ["stale", "missing", "off", "unusable"])
+def test_wellbeing_readout_never_presents_stale_sleepiness_as_live(window, reason):
+    w, clock = window
+    w.start_button.click()
+    w.controller.simulated = False
+    camera = dict(engine.camera, wellbeing={"blinks": 1, "yawns": 0, "state": "no_clear_signs",
+                                           "observed_at": clock[0]})
+    if reason == "stale":
+        clock[0] += 1
+    elif reason == "missing":
+        camera["present"] = False
+    elif reason == "off":
+        camera["status"] = "off"
+    else:
+        camera["wellbeing"]["observed_at"] = None
+    w.refresh_wellbeing(study.session_view(), camera, clock[0])
+    assert w.wellbeing_status.text() == "1 blink · 0 yawns · Sleepiness: unavailable"
+
+
+def test_starting_a_new_session_resets_wellbeing_and_does_not_save_it(window):
+    w, _ = window
+    engine.wellbeing_tracker.blinks = 42
+    engine.wellbeing_tracker.yawns = 3
+    w.start_button.click()
+    assert engine.camera["wellbeing"]["blinks"] == engine.camera["wellbeing"]["yawns"] == 0
+    w.end_session(confirm=False)
+    assert "wellbeing" not in study.last_report
+
+
+def test_tracking_details_include_live_blink_yawn_geometry(window, monkeypatch):
+    w, _ = window
+    engine.camera["wellbeing"] = {"eye_ratios": (.3, .25), "mouth_ratio": .6, "sample_hz": 14.8}
+    shown = []
+
+    def inspect_dialog(dialog):
+        shown.extend(widget.text() for widget in dialog.findChildren(QLabel))
+        return 0
+
+    monkeypatch.setattr(QDialog, "exec", inspect_dialog)
+    w.diagnostics()
+    details = "\n".join(shown)
+    assert "eyelids 0.30/0.25, mouth 0.60" in details
+    assert "14.8 frames/s" in details
 
 
 def test_defaults_are_25_5_computer_with_camera_and_preview(window):
@@ -208,10 +291,12 @@ def test_distracting_app_alert_counts_shows_popup_and_reports_apps(window):
         assert w.app_alert is None
         w.pause_button.click()
         assert w.end_session(confirm=False)
-        assert w.summary_apps.isVisibleTo(w)
+        assert w.summary_sites.isVisibleTo(w)
         apps = {a["name"]: a for a in w.report["apps"]}
         assert apps["discord"]["distracting"] and not apps["code"]["distracting"]
-        assert w.report["app_distraction_seconds"] > 0
+        assert w.report["activity"]["app_distraction"] > 0
+        assert w.summary_sites.detail.text().startswith("Top apps: ")
+        assert "Discord" in w.summary_sites.detail.text()
     finally:
         engine.app_monitor = None
 
@@ -228,9 +313,31 @@ def test_events_outside_work_are_dropped_not_queued(window):
     assert w.app_alert is None
 
 
-def test_summary_without_app_data_hides_the_apps_card(window):
+def test_summary_without_site_or_app_data_hides_the_activity_card(window):
     w, clock = window
     w.start_button.click()
     clock[0] += 5
     assert w.end_session(confirm=False)
-    assert not w.summary_apps.isVisibleTo(w)
+    assert not w.summary_sites.isVisibleTo(w)
+    assert w.summary_sites.detail.text() == ""
+
+
+def test_now_line_names_the_site_or_the_app_in_front(window):
+    w, clock = window
+    view = {"current_app": None}
+    browser = {"domain": "youtube.com", "category": "distraction"}
+    assert w.now_text(view, browser, True) == "youtube.com · distracting site"
+    other = {"domain": "(outside browser)", "category": "other"}
+    assert w.now_text({"current_app": ("discord", True)}, other, True) == "Discord · distracting app"
+    assert w.now_text({"current_app": ("code", False)}, other, True) == "Code · app"
+    assert w.now_text(view, other, True) == "Another app"
+    assert w.now_text(view, browser, False) == "Chrome not connected"
+
+
+def test_old_reports_still_render_in_the_merged_card(window):
+    w, _ = window
+    old = {"website": {"work": 10.0, "unlisted": 5.0, "distraction": 2.0, "outside": 3.0, "unavailable": 0.0}}
+    activity = w.report_activity(old)
+    assert activity["work"] == 10 and activity["app_other"] == 3 and activity["app_distraction"] == 0
+    assert [name for name, _, _ in w.activity_rows(activity)] == [
+        "Work sites", "Other sites", "Distracting sites", "Distracting apps", "Other apps"]

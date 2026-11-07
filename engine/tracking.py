@@ -83,6 +83,36 @@ def eye_gaze(lm, bs, aspect=1.0):
     return value, down - up
 
 
+def gesture_ratios(lm, aspect=1.0):
+    """Eyelid and inner-mouth opening relative to width, independent of iris/gaze quality."""
+    if len(lm) < 455 or not math.isfinite(aspect) or aspect <= 0:
+        return None, None, None
+
+    def distance(first, second):
+        return math.hypot((lm[first].x - lm[second].x) * aspect,
+                          lm[first].y - lm[second].y)
+
+    face_width = distance(234, 454)
+    if not math.isfinite(face_width) or face_width < .16:
+        return None, None, None
+
+    def opening(corners, pairs, maximum):
+        indices = (*corners, *(index for pair in pairs for index in pair))
+        if any(not (math.isfinite(lm[index].x) and math.isfinite(lm[index].y)
+                    and .005 < lm[index].x < .995 and .005 < lm[index].y < .995)
+               for index in indices):
+            return None
+        width = distance(*corners)
+        if width < .025:
+            return None
+        ratio = sum(distance(*pair) for pair in pairs) / (len(pairs) * width)
+        return ratio if 0 <= ratio <= maximum else None
+
+    return (opening((33, 133), ((160, 144), (158, 153)), .8),
+            opening((362, 263), ((385, 380), (387, 373)), .8),
+            opening((61, 291), ((13, 14),), 2.0))
+
+
 def landmark_quality(lm, aspect=1.0):
     if len(lm) < 478:
         return "iris landmarks missing"

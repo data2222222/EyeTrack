@@ -32,6 +32,43 @@ def transformed(lm, angle=0, aspect=4 / 3, scale=1, dx=0, dy=0):
     return result
 
 
+def gesture_face():
+    landmarks = face()
+    for index, horizontal, vertical in (
+            (160, .35, .382), (144, .35, .418), (158, .41, .382), (153, .41, .418),
+            (385, .59, .382), (380, .59, .418), (387, .65, .382), (373, .65, .418),
+            (61, .4, .65), (291, .6, .65), (13, .5, .64), (14, .5, .66)):
+        landmarks[index] = Point(x=horizontal, y=vertical)
+    return landmarks
+
+
+@pytest.mark.parametrize("angle", [-.4, 0, .4])
+@pytest.mark.parametrize("aspect", [1, 4 / 3, 16 / 9])
+def test_gesture_ratios_survive_roll_distance_and_aspect(angle, aspect):
+    original = gesture_face()
+    changed = transformed(original, angle, aspect, .8, .08, -.04)
+    assert tracking.gesture_ratios(original) == pytest.approx((.3, .3, .1))
+    assert tracking.gesture_ratios(changed, aspect) == pytest.approx(tracking.gesture_ratios(original, aspect))
+
+
+def test_gesture_geometry_does_not_require_valid_irises_or_other_eye():
+    landmarks = gesture_face()
+    landmarks[468].x = math.nan
+    assert tracking.gesture_ratios(landmarks) == pytest.approx((.3, .3, .1))
+    landmarks[160].x = math.nan
+    left, right, mouth = tracking.gesture_ratios(landmarks)
+    assert left is None
+    assert (right, mouth) == pytest.approx((.3, .1))
+
+
+def test_gesture_geometry_rejects_small_or_missing_landmarks():
+    assert tracking.gesture_ratios([]) == (None, None, None)
+    assert tracking.gesture_ratios(transformed(gesture_face(), scale=.1)) == (None, None, None)
+    landmarks = gesture_face()
+    landmarks[291] = landmarks[61]
+    assert tracking.gesture_ratios(landmarks)[2] is None
+
+
 def collect(calibration, values, start=0, fps=15):
     """Collect precisely one target, including its settling period."""
     stage = calibration.view()["stage"]

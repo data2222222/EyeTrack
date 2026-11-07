@@ -233,7 +233,7 @@ def test_report_keeps_score_and_trend(clock):
     assert len(report["trace"]) >= 4 and report["trace"][0] == 100
 
 
-def test_desktop_app_time_is_separate_from_focus_score(clock):
+def test_desktop_app_time_is_tracked_by_name_and_merged_into_activity(clock):
     start()
     info = {"app": "code", "app_distracting": False, "app_until": 1010.0}
     study.tick(0, info)
@@ -246,8 +246,8 @@ def test_desktop_app_time_is_separate_from_focus_score(clock):
     apps = {a["name"]: a for a in view["apps"]}
     assert apps["code"]["seconds"] == 5 and not apps["code"]["distracting"]
     assert apps["discord"]["seconds"] == 8 and apps["discord"]["distracting"]
-    assert view["app_distraction_seconds"] == 8
-    assert view["session_score"] is None                 # apps never change the focus score
+    assert view["activity"]["app_distraction"] == 8 and view["activity"]["app_other"] == 5
+    assert view["session_score"] is None                 # camera on but unobserved: nothing to score
 
 
 def test_app_alerts_count_and_reports_keep_top_apps(clock):
@@ -260,7 +260,7 @@ def test_app_alerts_count_and_reports_keep_top_apps(clock):
     assert report["counts"]["app"] == 1 and report["nudges"] == 0
     assert len(report["apps"]) == study.REPORT_APPS
     assert report["apps"][0]["seconds"] >= report["apps"][-1]["seconds"]
-    assert report["app_distraction_seconds"] > 0
+    assert report["activity"]["app_distraction"] > 0
 
 
 def test_app_alert_is_ignored_outside_work(clock):
@@ -268,3 +268,40 @@ def test_app_alert_is_ignored_outside_work(clock):
     study.pause_session()
     study.record_event("app")
     assert study.session_view()["counts"]["app"] == 0
+
+
+def test_distracting_app_counts_against_score_without_camera(clock):
+    start(camera_enabled=False)
+    for app, bad in (("code", False), ("discord", True)):
+        study.tick(0, {"app": app, "app_distracting": bad, "app_until": clock[0] + 100})
+        clock[0] += 10
+    study.tick(0, {})
+    clock[0] += 1
+    assert study.session_view()["session_score"] == 50      # 10 s of Code on task, 10 s of Discord off
+
+
+def test_distracting_app_lowers_camera_score_but_chrome_report_wins_when_browser_is_in_front(clock):
+    start()
+    on_screen = {"attention": "screen", "camera_category": "present", "camera_observed_at": clock[0] + 5}
+    study.tick(0, {**on_screen, "app": "discord", "app_distracting": True, "app_until": clock[0] + 100,
+                   "category": "productive", "browser_age": 0})
+    clock[0] += 5
+    view = study.session_view()
+    assert view["activity"]["work"] == 5 and view["activity"]["app_distraction"] == 0
+    assert view["apps"] == [] and view["current_app"] is None   # the browser is in front: Chrome's report wins
+    study.tick(0, {**on_screen, "camera_observed_at": clock[0] + 5, "app": "discord", "app_distracting": True,
+                   "app_until": clock[0] + 100, "category": "other", "browser_age": 0})
+    clock[0] += 4
+    view = study.session_view()
+    assert view["activity"]["app_distraction"] == 4
+    assert view["current_app"] == ("discord", True)
+    assert view["session_score"] == 56                          # 5 s of 9 on task: the last 4 s were on screen but in a distracting app
+
+
+def test_stale_chrome_report_lets_the_app_fill_in(clock):
+    start(camera_enabled=False)
+    study.tick(0, {"category": "productive", "browser_age": 200,       # extension went quiet
+                   "app": "code", "app_distracting": False, "app_until": clock[0] + 100})
+    clock[0] += 6
+    view = study.session_view()
+    assert view["activity"]["work"] == 0 and view["activity"]["app_other"] == 6

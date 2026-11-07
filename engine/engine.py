@@ -37,6 +37,7 @@ import appmonitor
 import phone_detection
 import study
 import tracking
+import wellbeing
 
 # ---------------- settings ----------------
 PORT = 8000
@@ -147,12 +148,13 @@ browser = {"domain": "waiting for extension", "category": "neutral", "idle": "ac
            "category_source": "list", "category_confidence": None, "category_pending": False}
 jev = None            # goal-aware classifier (engine/classifier), None if unavailable
 JevSurface = None
+wellbeing_tracker = wellbeing.WellbeingTracker()
 camera = {"status": "starting", "present": False, "facing": False, "reason": "-",
           "yaw": 0.0, "pitch": 0.0, "gaze_h": 0.5, "gaze_v": 0.0, "gaze_text": "-",
           "eyes_closed": False, "closed_since": None, "expression": "-", "looking_down": False,
           "scores": {n: 0.0 for n in EXPRESSION_NAMES},
           "phone": False, "phone_since": None, "phone_status": "starting", "phone_confidence": 0.0, "phone_tentative": False,
-          "yawns_total": 0,
+          "yawns_total": 0, "wellbeing": wellbeing_tracker.snapshot(time.monotonic()),
           "last_seen": time.time(), "started": time.time()}
 calib = tracking.Calibration()
 blinks = collections.deque()          # timestamps
@@ -773,8 +775,10 @@ def analyze_face(lm, bs, st, expression_votes, aspect=1.0):
             facing, reason = smoother.update(looking, detail, stamp)
     expression_votes.append(label)
     expression = collections.Counter(expression_votes).most_common(1)[0][0]
+    gesture_geometry = tracking.gesture_ratios(lm, aspect)
 
     with lock:
+        camera["wellbeing"] = wellbeing_tracker.update(stamp, bs, geometry=gesture_geometry)
         expression_log.append((now, expression))
         camera.update(present=True, facing=facing, reason=reason, yaw=yaw, pitch=pitch,
                       gaze_h=gaze_h, gaze_v=gaze_v,
@@ -790,10 +794,24 @@ def clear_face_tracking(st, expression_votes, reason="no face"):
     expression_votes.clear()
     st.clear()
     st.update(closed_since=None, jaw_since=None)
+    interrupt_wellbeing()
     calib.interrupt("Move into view and look at the target")
     set_camera(present=False, facing=False, reason=reason, closed_since=None,
                eyes_closed=False, looking_down=False, gaze_text="-", expression="-",
                scores={n: 0.0 for n in EXPRESSION_NAMES})
+
+
+def reset_wellbeing():
+    """Start fresh for a new session; these optional observations are never persisted."""
+    with lock:
+        wellbeing_tracker.reset()
+        camera["wellbeing"] = wellbeing_tracker.snapshot(time.monotonic())
+
+
+def interrupt_wellbeing():
+    with lock:
+        wellbeing_tracker.interrupt()
+        camera["wellbeing"] = wellbeing_tracker.snapshot(time.monotonic())
 
 
 def pick_fonts(platform, families, default_family, fixed_family):
@@ -1048,6 +1066,7 @@ def camera_loop(camera_index, stop_event=None):
     except Exception as exc:
         set_camera(status=f"camera error ({type(exc).__name__}): {str(exc)[:100]}")
     finally:
+        interrupt_wellbeing()
         set_camera(present=False, facing=False, phone=False, phone_since=None,
                    phone_confidence=0.0, phone_tentative=False, phone_status="off", closed_since=None, eyes_closed=False, gaze_text="-",
                    expression="-", scores={n: 0.0 for n in EXPRESSION_NAMES}, observed_at=None)
@@ -1697,6 +1716,7 @@ class CameraController:
         self.worker = None
         self.stop_event = threading.Event()
         self.enabled = False
+        interrupt_wellbeing()
         set_camera(status="off", present=False, facing=False, phone=False,
                    phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    phone_status="off")
@@ -1706,6 +1726,7 @@ class CameraController:
             return
         self.stop_event.clear()
         self.enabled = True
+        interrupt_wellbeing()
         set_camera(status="starting", present=False, facing=False, phone=False,
                    phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    last_seen=time.time())
@@ -1728,6 +1749,7 @@ class CameraController:
         if self.worker is not None:
             self.worker.join()
             self.worker = None
+        interrupt_wellbeing()
         set_camera(status="off", present=False, facing=False, phone=False,
                    phone_since=None, phone_confidence=0.0, phone_tentative=False, observed_at=None,
                    phone_status="off")

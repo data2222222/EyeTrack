@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 import study
+from wellbeing import MAX_SAMPLE_GAP
 from widgets import (
     AWAY, BG, BREAK, GOOD, IDLE, LINE, MUTED, PAPER, PHONE, RAISED, SURFACE, TEXT,
     Dropdown, PreviewView, Ring, SplitBar, Trend, score_style,
@@ -28,6 +29,7 @@ QLabel { background: transparent; }
 QLabel#brand { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
 QLabel#title { font-size: 30px; font-weight: 650; }
 QLabel#subtitle, QLabel#muted { color: @MUTED; }
+QLabel#wellbeing { color: @MUTED; font-size: 11px; }
 QLabel#eyebrow { color: @MUTED; font-size: 11px; font-weight: 650; letter-spacing: 1.6px; }
 QLabel#section { font-size: 14px; font-weight: 650; }
 QLabel#goal { font-size: 16px; font-weight: 600; }
@@ -144,8 +146,15 @@ class SplitCard(QFrame):
         self.grid.setVerticalSpacing(7)
         self.grid.setColumnStretch(1, 1)
         layout.addLayout(self.grid)
+        self.detail = label("", "muted", True)
+        self.detail.hide()
+        layout.addWidget(self.detail)
         self.keys = None
         self.rows = []
+
+    def set_detail(self, text):
+        self.detail.setText(text)
+        self.detail.setVisible(bool(text))
 
     def set_rows(self, rows):
         """rows: [(name, color, seconds)]"""
@@ -449,20 +458,32 @@ class FocusWindow(QMainWindow):
         self.fact_aways = label("0 look-aways", "muted")
         self.fact_phone = label("0 phone", "muted")
         self.fact_apps = label("0 app alerts", "muted")
-        self.site_label = label("", "muted")
-        self.site_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.site_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.now_label = label("", "muted")
+        self.now_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         facts.addWidget(self.fact_aways)
         facts.addSpacing(12)
         facts.addWidget(self.fact_phone)
         facts.addSpacing(12)
         facts.addWidget(self.fact_apps)
-        facts.addWidget(self.site_label, 1)
+        facts.addStretch()
+        score_box.addWidget(self.now_label)
         score_box.addLayout(facts)
         right.addWidget(score, 4)
         body.addLayout(right, 4)
         self.session_error = label("", "muted", True)
-        layout.addWidget(self.session_error)
+        footer = QHBoxLayout()
+        footer.addWidget(self.session_error, 1)
+        self.wellbeing_status = label("", "wellbeing")
+        self.wellbeing_status.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.wellbeing_status.setToolTip(
+            "Estimated blinks and yawns during this session, using the existing camera feed.\n"
+            "Sleepiness is only a rough cue from repeated yawns or prolonged eye closure, not a diagnosis.\n"
+            "Talking, lighting and glasses can affect these estimates. No clear signs does not mean alert.\n"
+            "No alerts, score changes or automatic pauses. Counts stay in memory and reset each session.\n"
+            "Live eyelid/mouth measurements are available in Tracking details in the ⋯ menu.")
+        self.wellbeing_status.hide()
+        footer.addWidget(self.wellbeing_status)
+        layout.addLayout(footer)
 
     def sync_camera(self, view):
         if view and view["phase"] == "work" and view["camera_enabled"]:
@@ -541,11 +562,9 @@ class FocusWindow(QMainWindow):
         split = QHBoxLayout()
         split.setSpacing(18)
         self.summary_attention = SplitCard("Where your attention went", "camera estimate")
-        self.summary_sites = SplitCard("Where your time went", "Chrome")
-        self.summary_apps = SplitCard("Desktop apps", "foreground time")
+        self.summary_sites = SplitCard("Where your time went", "Chrome and apps")
         split.addWidget(self.summary_attention, 1)
         split.addWidget(self.summary_sites, 1)
-        split.addWidget(self.summary_apps, 1)
         layout.addLayout(split)
 
         result, result_box = card(margins=(22, 14, 22, 14))
@@ -580,6 +599,7 @@ class FocusWindow(QMainWindow):
             return
         self.setup_error.hide()
         self.engine.events.clear()
+        self.engine.reset_wellbeing()
         self.session_error.clear()
         self.preview_hidden = False
         self.engine.show_preview = True
@@ -653,14 +673,10 @@ class FocusWindow(QMainWindow):
         self.summary_attention.setVisible(bool(report["camera_enabled"] and focus))
         if focus:
             self.summary_attention.set_rows(self.attention_rows(focus, report["mode"]))
-        site = report["website"]
-        self.summary_sites.setVisible(any(site[k] > 0 for k in ("work", "unlisted", "distraction", "outside")))
-        self.summary_sites.set_rows([("Work sites", GOOD, site["work"]), ("Other sites", PAPER, site["unlisted"]),
-                                     ("Distracting sites", PHONE, site["distraction"]), ("Other apps", IDLE, site["outside"])])
-        apps = report.get("apps") or []
-        self.summary_apps.setVisible(bool(apps))
-        if apps:
-            self.summary_apps.set_rows(self.app_rows(apps, report.get("app_distraction_seconds", 0.0)))
+        activity = self.report_activity(report)
+        self.summary_sites.setVisible(any(activity[k] > 0 for k in study.ACTIVITY if k != "unknown"))
+        self.summary_sites.set_rows(self.activity_rows(activity))
+        self.summary_sites.set_detail(self.apps_detail(report.get("apps")))
         self.result_group.setExclusive(False)
         for w in self.result_group.buttons():
             w.setChecked(False)
@@ -678,11 +694,34 @@ class FocusWindow(QMainWindow):
         return rows
 
     @staticmethod
-    def app_rows(apps, distraction):
-        """Distracting-app time first, then the most-used other apps (names only, no titles)."""
-        rows = [("Distracting apps", PHONE, distraction)]
-        rows += [(app["name"].title(), PAPER, app["seconds"]) for app in apps if not app["distracting"]][:3]
-        return rows
+    def report_activity(report):
+        """Merged sites + apps seconds; reports from before app tracking only have the Chrome split."""
+        if report.get("activity"):
+            return {**dict.fromkeys(study.ACTIVITY, 0.0), **report["activity"]}
+        site = report["website"]
+        return {**dict.fromkeys(study.ACTIVITY, 0.0), "work": site["work"], "unlisted": site["unlisted"],
+                "distraction": site["distraction"], "app_other": site["outside"]}
+
+    @staticmethod
+    def activity_rows(activity):
+        return [("Work sites", GOOD, activity["work"]), ("Other sites", PAPER, activity["unlisted"]),
+                ("Distracting sites", PHONE, activity["distraction"]),
+                ("Distracting apps", AWAY, activity["app_distraction"]), ("Other apps", IDLE, activity["app_other"])]
+
+    @staticmethod
+    def apps_detail(apps):
+        """Most-used desktop apps by name and time (no window titles)."""
+        top = [f"{app['name'].title()} {study.format_duration(app['seconds'])}" for app in (apps or [])[:3]]
+        return "Top apps: " + " · ".join(top) if top else ""
+
+    @staticmethod
+    def now_text(view, browser, connected):
+        current = view.get("current_app")
+        if connected and browser["category"] != "other":
+            return f"{browser['domain']} · {SITE_TEXT.get(browser['category'], 'site')}"
+        if current:
+            return f"{current[0].title()} · {'distracting app' if current[1] else 'app'}"
+        return "Another app" if connected else "Chrome not connected"
 
     def save_result(self, result):
         try:
@@ -799,21 +838,34 @@ class FocusWindow(QMainWindow):
         self.fact_phone.setText(f"{view['counts']['phone']} phone")
         app_alerts = view["counts"].get("app", 0)
         self.fact_apps.setText(f"{app_alerts} app alert{'s' if app_alerts != 1 else ''}")
-        if connected:
-            self.site_label.setText(f"{browser['domain']} · {SITE_TEXT.get(browser['category'], 'site')}")
-        else:
-            self.site_label.setText("Chrome not connected")
+        self.now_label.setText("Now · " + self.now_text(view, browser, connected))
 
         # attention card and camera view
         if view["camera_enabled"]:
             self.attention_card.set_rows(self.attention_rows(view["focus"], view["mode"]))
             self.attention_card.note.setText("this session")
         else:
-            site = view["website"]
-            self.attention_card.set_rows([("Work sites", GOOD, site["work"]), ("Other sites", PAPER, site["unlisted"]),
-                                          ("Distracting sites", PHONE, site["distraction"]), ("Other apps", IDLE, site["outside"])])
-            self.attention_card.note.setText("Chrome, camera off")
+            self.attention_card.set_rows(self.activity_rows(view["activity"]))
+            self.attention_card.note.setText("Chrome and apps, camera off")
         self.refresh_preview(view, camera, phase)
+        self.refresh_wellbeing(view, camera, now)
+
+    def refresh_wellbeing(self, view, camera, now):
+        visible = bool(view["camera_enabled"] and view["phase"] == "work" and not self.controller.simulated)
+        self.wellbeing_status.setVisible(visible)
+        if not visible:
+            return
+        observation = camera.get("wellbeing", {})
+        stamp = observation.get("observed_at")
+        state = observation.get("state", "unavailable")
+        if (camera["status"] != "ok" or not camera["present"] or stamp is None
+                or not 0 <= now - stamp <= MAX_SAMPLE_GAP):
+            state = "unavailable"
+        status = {"unavailable": "unavailable", "collecting": "learning…",
+                  "possible": "possible signs", "no_clear_signs": "no clear signs"}[state]
+        blinks, yawns = observation.get("blinks", 0), observation.get("yawns", 0)
+        self.wellbeing_status.setText(
+            f"{blinks} blink{'' if blinks == 1 else 's'} · {yawns} yawn{'' if yawns == 1 else 's'} · Sleepiness: {status}")
 
     def refresh_preview(self, view, camera, phase):
         chip, chip_color = "", IDLE
@@ -879,10 +931,19 @@ class FocusWindow(QMainWindow):
             with self.engine.lock:
                 c = dict(self.engine.camera)
             confidence = c.get("phone_confidence")
+            signals = c.get("wellbeing", {})
+            eyelids = "/".join("–" if ratio is None else f"{ratio:.2f}"
+                               for ratio in signals.get("eye_ratios", (None, None)))
+            mouth = signals.get("mouth_ratio")
+            mouth_text = "–" if mouth is None else f"{mouth:.2f}"
+            sample_hz = signals.get("sample_hz")
+            rate_text = "–" if sample_hz is None else f"{sample_hz:.1f}"
             phone_note = " - possible phone, not counted" if c.get("phone_tentative") else ""
             details.setText(f"Camera: {c['status']}\nObservation: {c['reason']}\n"
                             f"Head: yaw {c['yaw']:.3f}, pitch {c['pitch']:.3f}\n"
                             f"Eye estimate: {c['gaze_h']:.3f}, {c['gaze_v']:.3f}\n"
+                            f"Blink/yawn geometry: eyelids {eyelids}, mouth {mouth_text}\n"
+                            f"Camera analysis: {rate_text} frames/s\n"
                             f"Phone detector: {c['phone_status']}"
                             + (f" (confidence {confidence:.2f}{phone_note})" if confidence else "") + "\n"
                             "These estimates do not establish attention or phone activity.")

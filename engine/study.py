@@ -14,6 +14,8 @@ MODES = {"pc": "Computer only", "both": "Computer + paper", "notebook": "Paper"}
 SETUP_MODES = ("pc", "both")
 RHYTHMS = ((25, 5), (50, 10), (15, 3))         # (focus minutes, break minutes); the first is the default
 WEBSITE_CATEGORIES = ("work", "unlisted", "distraction", "outside", "unavailable")
+CHROME_CATEGORIES = ("work", "unlisted", "distraction")   # the browser is in front
+ACTIVITY = CHROME_CATEGORIES + ("app_distraction", "app_other", "unknown")   # one merged "where the time went"
 CAMERA_CATEGORIES = ("present", "no_face", "unavailable")
 ATTENTION = ("screen", "paper", "away", "no_face", "phone", "unavailable")
 ON_TASK = ("screen", "paper")                   # camera states that count toward the focus score
@@ -77,7 +79,7 @@ def start_session(subject="", goal="", work_min=25, break_min=5,
             "website": dict.fromkeys(WEBSITE_CATEGORIES, 0.0),
             "camera": dict.fromkeys(CAMERA_CATEGORIES, 0.0),
             "focus": dict.fromkeys(ATTENTION, 0.0), "recent": collections.deque(),
-            "apps": {}, "app_distraction": 0.0, "trace": {}, "tracked": 0.0, "on_task": 0.0, "look_aways": 0,
+            "apps": {}, "activity": dict.fromkeys(ACTIVITY, 0.0), "trace": {}, "tracked": 0.0, "on_task": 0.0, "look_aways": 0,
             "now": "unavailable", "now_since": now, "away_since": None, "away_counted": False,
             "info": {}, "completed": False, "completion_announced": False,
         }
@@ -108,24 +110,37 @@ def _attribute(s, start, end):
     att_fresh = max(0.0, min(end, info.get("attention_until", start)) - start)
     s["focus"][bucket] += att_fresh
     s["focus"]["unavailable"] += duration - att_fresh
-    # Desktop apps are a separate observation: they never change the focus score.
-    app = info.get("app")
-    app_fresh = max(0.0, min(end, info.get("app_until", start)) - start)
-    if app and app_fresh > 0:
-        entry = s["apps"].setdefault(str(app)[:40], {"seconds": 0.0, "distracting": False})
-        entry["seconds"] += app_fresh
-        entry["distracting"] = entry["distracting"] or bool(info.get("app_distracting"))
-        if info.get("app_distracting"):
-            s["app_distraction"] += app_fresh
-    # Focus score: share of tracked time spent on task. Without a camera only the site counts.
+    # What was in front. Chrome's own report wins while the browser is in front; otherwise the
+    # foreground app (when known) fills in, so time away from Chrome is no longer anonymous.
+    chrome_front = website in CHROME_CATEGORIES and web_fresh > 0
+    app = None if chrome_front else info.get("app")
+    app_fresh = max(0.0, min(end, info.get("app_until", start)) - start) if app else 0.0
+    app_bad = bool(info.get("app_distracting")) and app_fresh > 0
+    activity = s["activity"]
+    if chrome_front:
+        activity[website] += web_fresh
+        activity["unknown"] += duration - web_fresh
+    else:
+        activity["app_distraction" if app_bad else "app_other"] += app_fresh
+        activity["unknown"] += duration - app_fresh
+        if app_fresh > 0:
+            entry = s["apps"].setdefault(str(app)[:40], {"seconds": 0.0, "distracting": False})
+            entry["seconds"] += app_fresh
+            entry["distracting"] = entry["distracting"] or app_bad
+    # Focus score: share of tracked time spent on task. A distracting site or app counts against it.
     if s["camera_enabled"]:
         tracked = att_fresh
         on = att_fresh if bucket in ON_TASK else 0.0
         if website == "distraction":
             on -= min(on, web_fresh)
-    else:
-        tracked = web_fresh if website in ("work", "unlisted", "distraction") else 0.0
+        elif app_bad:
+            on -= min(on, app_fresh)
+    elif chrome_front:
+        tracked = web_fresh
         on = web_fresh if website in ("work", "unlisted") else 0.0
+    else:
+        tracked = app_fresh
+        on = 0.0 if app_bad else app_fresh
     if tracked > 0:
         s["tracked"] += tracked
         s["on_task"] += on
@@ -140,6 +155,16 @@ def _top_apps(s):
     ranked = sorted(s["apps"].items(), key=lambda item: -item[1]["seconds"])[:REPORT_APPS]
     return [{"name": name, "seconds": entry["seconds"], "distracting": entry["distracting"]}
             for name, entry in ranked]
+
+
+def _current_app(s):
+    """(name, distracting) for the app in front right now, when fresh and not just the browser."""
+    info = s["info"]
+    now = time.monotonic()
+    browser_front = info.get("website") in CHROME_CATEGORIES and info.get("website_until", 0) > now
+    if s["phase"] == "work" and info.get("app") and not browser_front and info.get("app_until", 0) > now:
+        return info["app"], bool(info.get("app_distracting"))
+    return None
 
 
 def _score(tracked, on):
@@ -297,8 +322,8 @@ def session_view():
             "break_planned": s["break_min"] * 60, "website": dict(s["website"]),
             "focus": dict(s["focus"]), "score": _recent_score(s),
             "session_score": _score(s["tracked"], s["on_task"]), "trace": _trace(s),
-            "look_aways": s["look_aways"], "apps": _top_apps(s),
-            "app_distraction_seconds": s["app_distraction"], "now": s["now"],
+            "look_aways": s["look_aways"], "apps": _top_apps(s), "activity": dict(s["activity"]),
+            "current_app": _current_app(s), "now": s["now"],
             "now_seconds": max(0.0, time.monotonic() - s["now_since"]),
         }
 
@@ -324,7 +349,7 @@ def stop_session(goal_done=None):
             "website": dict(s["website"]), "camera": dict(s["camera"]),
             "focus": dict(s["focus"]), "score": _score(s["tracked"], s["on_task"]),
             "trace": _trace(s), "look_aways": s["look_aways"],
-            "apps": _top_apps(s), "app_distraction_seconds": s["app_distraction"],
+            "apps": _top_apps(s), "activity": dict(s["activity"]),
         }
         save_json(REPORTS_PATH, [*reports, report])
         reports.append(report)
