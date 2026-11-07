@@ -342,7 +342,7 @@ def test_settings_fit_without_horizontal_overflow_or_clipped_actions(window, app
     dialog.cancel_button.click()
 
 
-def test_setup_screen_offers_settings_by_keyboard_and_from_the_page(window, app):
+def test_setup_screen_offers_settings_by_keyboard_and_from_the_page(window, app, tmp_path):
     w, _ = window
     assert w.settings_link.accessibleName() == "Open settings"
     w.settings_link.click()
@@ -353,6 +353,16 @@ def test_setup_screen_offers_settings_by_keyboard_and_from_the_page(window, app)
     w.settings_dialog.cancel_button.click()
     app.processEvents()
     assert w.settings_dialog is None
+    w.activateWindow()
+    app.processEvents()
+    QTest.keyClick(w, Qt.Key.Key_Comma, Qt.KeyboardModifier.ControlModifier)
+    app.processEvents()
+    assert w.settings_dialog is not None
+    w.settings_dialog.volume.setValue(90)
+    QTest.keyClick(w.settings_dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert w.settings_dialog is None
+    assert not saved_file(tmp_path).exists()
 
 
 def test_keyboard_focus_scrolls_settings_controls_into_view(window, app):
@@ -409,3 +419,16 @@ def test_zero_volume_has_an_explicit_muted_hint(window, app):
     dialog.volume.setValue(0)
     assert dialog.sound_note.isVisibleTo(dialog)
     assert "Volume is 0" in dialog.sound_note.text()
+
+
+def test_closing_settings_disconnects_focus_following(window, app, monkeypatch):
+    focus_window, _ = window
+    dialog = open_from_menu(focus_window, app)
+    revealed = []
+    monkeypatch.setattr(dialog.scroll, "ensureWidgetVisible", lambda *args: revealed.append(args))
+    app.focusChanged.emit(None, dialog.preview_default)
+    assert revealed
+    revealed.clear()
+    dialog.reject()
+    app.focusChanged.emit(None, dialog.preview_default)
+    assert not revealed
