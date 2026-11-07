@@ -3,7 +3,10 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen,
 )
-from PySide6.QtWidgets import QComboBox, QPushButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSpinBox, QStyle,
+    QStyleOptionButton, QVBoxLayout, QWidget,
+)
 
 # One palette for the whole window; the stylesheet in desktop.py reads the same values.
 BG = "#0e1113"
@@ -45,6 +48,59 @@ def mono_font(size, weight=QFont.Weight.Medium):
     return font
 
 
+def label(text="", name="", wrap=False):
+    w = QLabel(text)
+    w.setObjectName(name)
+    w.setWordWrap(wrap)
+    w.setTextFormat(Qt.TextFormat.PlainText)
+    return w
+
+
+def button(text, action=None, name="", checkable=False):
+    w = QPushButton(text)
+    w.setObjectName(name)
+    w.setCheckable(checkable)
+    w.setCursor(Qt.CursorShape.PointingHandCursor)
+    if action:
+        w.clicked.connect(action)
+    return w
+
+
+def card(margins=(22, 20, 22, 20), spacing=12):
+    w = QFrame()
+    w.setObjectName("card")
+    layout = QVBoxLayout(w)
+    layout.setContentsMargins(*margins)
+    layout.setSpacing(spacing)
+    return w, layout
+
+
+class Check(QCheckBox):
+    """Check box that draws its own tick, so the checked state reads clearly under any Qt style."""
+
+    def __init__(self, text="", name=""):
+        super().__init__(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if name:
+            self.setAccessibleName(name)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        box = QRectF(self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor("#07140e" if self.isEnabled() else "#5f8c7c"), 2.0, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        w, h = box.width(), box.height()
+        p.drawPolyline([QPointF(box.left() + w * .28, box.top() + h * .52),
+                        QPointF(box.left() + w * .44, box.top() + h * .68),
+                        QPointF(box.left() + w * .73, box.top() + h * .33)])
+
+
 class Dropdown(QComboBox):
     """Combo box with its own chevron, so it looks the same under any Qt style."""
 
@@ -55,6 +111,41 @@ class Dropdown(QComboBox):
         p.setPen(QPen(QColor(MUTED), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         cx, cy = self.width() - 18, self.height() / 2
         p.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
+
+
+class Stepper(QWidget):
+    """A number field with large minus/plus buttons that look the same under any Qt style."""
+
+    def __init__(self, minimum, maximum, value, suffix=" min", name=""):
+        super().__init__()
+        self.spin = QSpinBox()
+        self.spin.setRange(minimum, maximum)
+        self.spin.setValue(value)
+        self.spin.setSuffix(suffix)
+        self.spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spin.setAccessibleName(name)
+        self.spin.setMinimumWidth(56)
+        self.less = button("\u2212", lambda: self.spin.stepDown(), "step")
+        self.more = button("+", lambda: self.spin.stepUp(), "step")
+        self.less.setAccessibleName(f"Decrease {name.lower()}")
+        self.more.setAccessibleName(f"Increase {name.lower()}")
+        for w in (self.less, self.more):
+            w.setAutoRepeat(True)
+            w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            w.setFixedSize(40, 40)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self.less)
+        row.addWidget(self.spin, 1)
+        row.addWidget(self.more)
+        self.setFocusProxy(self.spin)
+
+    def value(self):
+        return self.spin.value()
+
+    def setValue(self, value):
+        self.spin.setValue(value)
 
 
 class PreviewView(QWidget):

@@ -7,6 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 import engine
+import sounds
 import study
 from desktop import FocusWindow
 
@@ -24,6 +25,7 @@ def window(app, monkeypatch, tmp_path):
     monkeypatch.setattr(study, "session", None)
     monkeypatch.setattr(study, "last_report", None)
     monkeypatch.setattr(study, "reports", [])
+    monkeypatch.setattr(study, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(study, "REPORTS_PATH", str(tmp_path / "sessions.json"))
     monkeypatch.setattr(engine, "camera", dict(engine.camera))
     monkeypatch.setattr(engine, "browser", dict(engine.browser))
@@ -31,6 +33,7 @@ def window(app, monkeypatch, tmp_path):
     monkeypatch.setattr(engine, "events", [])
     monkeypatch.setattr(engine, "running", True)
     monkeypatch.setattr(engine, "camera_controller", engine.CameraController(simulated=True))
+    monkeypatch.setattr(sounds, "_start_audio", lambda *args: None)
     w = FocusWindow(engine, start_timer=False)
     w.show()
     app.processEvents()

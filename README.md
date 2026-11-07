@@ -1,5 +1,7 @@
 # EyeTrack — desktop focus sessions
 
+Presenting the project? See the [hackathon demo guide](docs/DEMO.md) for a short walkthrough and hardware-free fallback.
+
 A calm desktop flow for one focus block: optionally enter a goal, start a 25-minute session (5-minute break), watch a live camera view with a focus score, and review where your attention went. The Chrome extension supplies website activity to the desktop app. Camera observations are estimates, not proof of attention or productivity.
 
 Two parts:
@@ -43,17 +45,25 @@ Windows, macOS and Linux run the same code (CI tests all three on Python 3.12). 
 - **macOS**: allow camera access for your terminal/Python in System Settings > Privacy & Security > Camera. Model downloads use the `certifi` CA bundle. Qt is installed with the Python requirements.
 - **Linux**: camera via V4L2 (`/dev/video0`, with camera access for your desktop user). If Qt reports a missing XCB cursor library, install `libxcb-cursor0` using your distribution package manager. The desktop interface no longer requires Tk.
 
-Technical camera measurements and a UI-only check-in preview are behind the ⋯ menu.
+Settings, technical camera measurements and a UI-only check-in preview are behind the ⋯ menu.
 
 ## Desktop session flow
 
 1. **Set up:** an optional goal, plus two small dropdowns: *Working with* (**Computer only** or **Computer + paper**) and *Rhythm* (**25 min focus · 5 min break** by default; also 50/10 and 15/3). The camera is on by default and can be switched off. In *Computer + paper* mode, looking down toward the desk counts as on task.
-2. **Work:** the camera preview is shown by default (a **Hide** button on it hides the picture while tracking continues), with a live state chip (**On screen**, **On paper**, **Looking away**, **Out of view**, **On phone**) and how long it has lasted. Beside it, a countdown ring with **Pause / Resume**, **Take a break** and **End**, and a live **Focus score** with a trend line, look-away and phone counts and the current site. A bar shows where your attention went this session. The ⋯ menu holds screen calibration, tracking details and Chrome setup.
+2. **Work:** the camera preview is shown by default (a **Hide** button on it hides the picture while tracking continues), with a live state chip (**On screen**, **On paper**, **Looking away**, **Out of view**, **On phone**) and how long it has lasted. Beside it, a countdown ring with **Pause / Resume**, **Take a break** and **End**, and a live **Focus score** with a trend line, look-away and phone counts and the current site. A bar shows where your attention went this session. The ⋯ menu holds settings, screen calibration, tracking details and Chrome setup.
 3. **Review:** the final focus score and trend, active/break/paused time, look-aways, phone pickups, where your attention and time went, and an optional goal-completion self-report. **New session** returns to setup.
 
 **Focus score (0 to 100):** the share of tracked time spent on task. On task means the camera sees you looking at the screen (or at paper, in *Computer + paper* mode) and you are not on a distracting site or in a distracting desktop app. Looking away, being out of view, a phone in view, or a distracting site or app all count as off task. Time without a fresh camera observation is not scored, and the live number covers the last 5 minutes of active time and appears after about 5 tracked seconds. Without a camera, the score comes from the Chrome site or desktop app in front. A look-away is counted when you look away for 3 seconds or more. It is an estimate from a webcam, not a measure of productivity.
 
 Only an explicit pause or break stops active time. Camera absence and AFK do not pause it. Resuming preserves the remaining work block. Five-minute breaks can end early or stay open longer; they never auto-resume. A completed block stops at its planned duration instead of automatically starting another block.
+
+### Settings and sounds
+
+Open **⋯ → Settings…** from any screen to choose your defaults. Session length, break length, working mode, camera use and camera-preview visibility apply to the **next session**, never to a running block. Opening settings does not turn on the camera; hiding its preview does not stop tracking. **Cancel** discards changes and **Save settings** keeps them for your next launch.
+
+Sounds are short, locally generated cues, with a master switch, volume, tone choices and separate switches for focus check-ins and block completion. **Sound changes apply as soon as you save**, including during a running session. You can preview a tone in settings. A completed block plays its cue once, not every timer refresh; the diagnostic check-in preview does not play a sound or count as a tracked nudge. Sounds are optional: if an audio backend or output device is unavailable, the session and visual reminders still work.
+
+Preferences are stored locally in `engine/data/preferences.json`, separately from Jev configuration and session reports. No API key, camera image or browsing data is stored in preferences, and settings never send anything externally.
 
 The camera starts only for camera-enabled work and is stopped/joined on pause, break, completion, end and app close. The real camera and both detector resources are released before shutdown. Calibration/tracking remains in `tracking.py` and is being developed separately.
 
