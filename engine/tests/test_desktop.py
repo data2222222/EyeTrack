@@ -337,37 +337,86 @@ def test_now_line_names_the_site_or_the_app_in_front(window):
     assert w.now_text(view, browser, False) == "Chrome not connected"
 
 
-def test_current_activity_is_a_separate_compact_card_with_plain_tab_titles(window):
+def test_header_activity_shows_tab_or_foreground_app_with_plain_titles(window):
     w, _ = window
     w.start_button.click()
     view = study.session_view()
     browser = {"domain": "example.com", "category": "productive", "title": "<Physics> & circuits"}
     w.refresh_activity(view, browser, True)
-    assert w.active_app.parentWidget() is w.activity_card
-    assert w.active_tab.parentWidget() is w.activity_card
-    assert w.active_app.text() == "Chrome · work site"
-    assert w.active_tab.toolTip() == "<qt>example.com · &lt;Physics&gt; &amp; circuits</qt>"
-    assert w.active_tab.accessibleDescription() == "example.com · <Physics> & circuits"
+    assert w.activity_status.parentWidget() is w.header
+    assert w.activity_status.full_text == "●  Chrome · <Physics> & circuits"
+    assert w.activity_status.toolTip() == "<qt>Chrome · &lt;Physics&gt; &amp; circuits · example.com · work site</qt>"
+    assert w.activity_status.accessibleDescription() == "Chrome · <Physics> & circuits · example.com · work site"
     from PySide6.QtCore import Qt
-    assert w.active_tab.textFormat() == Qt.TextFormat.PlainText
+    assert w.activity_status.textFormat() == Qt.TextFormat.PlainText
     other = {"domain": "(outside browser)", "category": "other", "title": ""}
     w.refresh_activity(dict(view, current_app=("discord", True)), other, True)
-    assert w.active_app.text() == "Discord · distracting app"
-    assert w.active_tab.text() == "Chrome is in the background"
+    assert w.activity_status.full_text == "●  Discord · distracting app"
+    assert w.activity_status.property("ok")
     w.refresh_activity(dict(view, current_app=None), other, False)
-    assert w.active_app.text() == "Active app unavailable"
-    assert w.active_tab.text() == "Chrome not connected"
+    assert w.activity_status.full_text == "○  Active app unavailable"
+    assert not w.activity_status.property("ok")
+    w.refresh_activity(dict(view, current_app=("code", False)), other, False)
+    assert w.activity_status.full_text == "●  Code · app"
+    w.refresh_activity(view, dict(browser, title=""), True)
+    assert w.activity_status.full_text == "●  Chrome · example.com"
 
 
-def test_current_activity_card_remains_visible_at_minimum_window_size(window, app):
+def test_header_stays_compact_and_elides_long_titles_at_minimum_size(window, app):
     w, _ = window
     w.resize(900, 660)
     w.start_button.click()
     app.processEvents()
-    viewport = w.stack.currentWidget().viewport()
-    corner = w.activity_card.mapTo(viewport, w.activity_card.rect().bottomRight())
-    assert viewport.rect().contains(corner)
-    assert w.activity_card.height() < 110
+    title = "A very long physics tab title " * 20
+    w.refresh_activity(study.session_view(), {"domain": "example.com", "category": "productive", "title": title}, True)
+    app.processEvents()
+    assert w.header.height() == 28
+    assert w.header.geometry().top() == 10
+    assert w.stack.geometry().top() <= 50
+    for control in (w.activity_status, w.connection, w.menu_button):
+        assert w.header.rect().contains(control.geometry())
+        assert control.height() == 28
+    assert w.activity_status.geometry().right() < w.connection.geometry().left()
+    assert w.connection.geometry().right() < w.menu_button.geometry().left()
+    assert w.activity_status.text().endswith("…")
+    assert title in w.activity_status.accessibleDescription()
+    short_text = w.activity_status.text()
+    w.resize(1300, 740)
+    app.processEvents()
+    assert len(w.activity_status.text()) >= len(short_text)
+
+
+@pytest.mark.parametrize("phase,expected", [("paused", "Activity paused"), ("break", "On a break"), ("complete", "Block complete")])
+def test_header_clears_activity_outside_work(window, phase, expected):
+    w, _ = window
+    w.start_button.click()
+    engine.browser.update(domain="example.com", title="Physics", category="productive", updated=study.time.time())
+    w.refresh()
+    assert "Physics" in w.activity_status.full_text
+    if phase == "paused":
+        study.pause_session()
+    elif phase == "break":
+        study.start_break()
+    else:
+        study.session["phase"] = "complete"
+    w.refresh()
+    assert w.activity_status.full_text == "○  " + expected
+    assert "Physics" not in w.activity_status.toolTip()
+    w.end_session(confirm=False)
+    w.refresh()
+    assert w.activity_status.full_text == "○  Start a session to see activity"
+
+
+def test_header_drops_stale_browser_activity(window):
+    w, clock = window
+    w.start_button.click()
+    engine.browser.update(domain="example.com", title="Physics", category="productive", updated=study.time.time())
+    w.refresh()
+    assert "Physics" in w.activity_status.full_text
+    clock[0] += 76
+    w.refresh()
+    assert "Physics" not in w.activity_status.full_text
+    assert not w.activity_status.property("ok")
 
 
 def test_old_reports_still_render_in_the_merged_card(window):

@@ -75,6 +75,29 @@ def card(margins=(22, 20, 22, 20), spacing=12):
     return w, layout
 
 
+class ElidedLabel(QLabel):
+    """A single line that keeps its full text when resized."""
+
+    def __init__(self, text="", name=""):
+        super().__init__()
+        self.setObjectName(name)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self.full_text = text
+        self._elide()
+
+    def _elide(self):
+        super().setText(self.fontMetrics().elidedText(
+            self.full_text, Qt.TextElideMode.ElideRight, max(0, self.contentsRect().width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
 class Check(QCheckBox):
     """Check box that draws its own tick, so the checked state reads clearly under any Qt style."""
 
@@ -235,6 +258,39 @@ class PreviewView(QWidget):
             p.drawEllipse(QPointF(pill.left() + 16, pill.center().y()), 5, 5)
             p.setPen(QColor(TEXT))
             p.drawText(pill.adjusted(30, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.chip)
+
+
+class ProgressRing(QWidget):
+    """Small circular progress border for the return-to-task check-in."""
+
+    def __init__(self):
+        super().__init__()
+        self.fraction = None
+        self.setFixedSize(64, 64)
+        self.setAccessibleName("Return-to-task progress")
+        self.hide()
+
+    def set_progress(self, fraction):
+        self.fraction = None if fraction is None else max(0.0, min(1.0, fraction))
+        self.setVisible(self.fraction is not None)
+        self.setAccessibleDescription("" if self.fraction is None else
+                                      f"Locking back in: {round(self.fraction * 100)} percent")
+        self.update()
+
+    def paintEvent(self, event):
+        if self.fraction is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        border = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(LINE), 4))
+        p.drawEllipse(border)
+        p.setPen(QPen(QColor(GOOD), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(border, 90 * 16, int(-360 * 16 * self.fraction))
+        p.setPen(QColor(TEXT))
+        p.setFont(mono_font(13))
+        p.drawText(border, Qt.AlignmentFlag.AlignCenter, f"{round(self.fraction * 100)}%")
 
 
 class Ring(QWidget):

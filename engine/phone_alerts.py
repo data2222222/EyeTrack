@@ -11,6 +11,7 @@ MODES = {
 }
 CHIME_AFTER = 3
 MAX_GAP = 1.0
+RETURN_AFTER = 2
 
 
 class CameraAlerts:
@@ -47,3 +48,29 @@ class CameraAlerts:
 
 class PhoneAlerts(CameraAlerts):
     """Cadence for confirmed phones; also shared by looking-away alerts."""
+
+
+class LookingAwayAlerts(CameraAlerts):
+    """After escalation, require sustained on-task observations to clear the alarm."""
+
+    def reset(self):
+        super().reset()
+        self.return_since = None
+
+    def update(self, now, visible, mode="strict"):
+        if visible:
+            self.return_since = None
+        elif (self.last_alarm is not None and self.last_seen is not None
+              and 0 <= now - self.last_seen <= MAX_GAP + 1e-6):
+            if self.return_since is None:
+                self.return_since = now
+            # Keep the existing alarm cadence during a brief return to the task.
+            visible = now - self.return_since < RETURN_AFTER
+        return super().update(now, visible, mode)
+
+    def recovery_progress(self, now):
+        """Fraction of the continuous return completed, or None when not recovering."""
+        if (self.return_since is None or self.last_seen is None
+                or not 0 <= now - self.last_seen <= MAX_GAP + 1e-6):
+            return None
+        return max(0.0, min(1.0, (now - self.return_since) / RETURN_AFTER))

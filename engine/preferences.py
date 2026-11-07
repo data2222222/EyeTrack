@@ -23,6 +23,8 @@ DEFAULTS = {
     "alert_strictness": "strict",
     "camera_enabled": True,
     "show_preview": True,
+    "overlay_enabled": True,
+    "overlay_corner": "top_right",
     "work_minutes": 25,
     "break_minutes": 5,
     "mode": "pc",
@@ -37,6 +39,7 @@ _INTEGER_BOUNDS = {
     "break_minutes": (1, 60),
 }
 _CHOICES = {"sound_style": SOUND_STYLES, "mode": ("pc", "both"),
+            "overlay_corner": ("top_right", "top_left", "bottom_right", "bottom_left"),
             "alert_strictness": ("light", "strict", "asian_parent")}
 
 

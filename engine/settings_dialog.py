@@ -14,6 +14,7 @@ import jev_settings
 from phone_alerts import MODES
 import study
 from blocklist_editor import ListEditor
+from overlay import CORNERS
 from widgets import LINE, Check, Dropdown, Stepper, button, label
 
 SOUND_STYLES = (("Chime", "chime"), ("Bell", "bell"), ("Soft", "soft"))
@@ -47,7 +48,7 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(28, 24, 28, 22)
         outer.setSpacing(14)
         outer.addWidget(label("Settings", "title"))
-        banner = label("Sounds and alert strictness apply as soon as you save. Session length, mode and camera defaults apply "
+        banner = label("Sounds, alert strictness and the overlay apply as soon as you save. Session length, mode and camera defaults apply "
                        "from your next session; a running session keeps its timers and camera.", "subtitle", True)
         outer.addWidget(banner)
 
@@ -64,6 +65,7 @@ class SettingsDialog(QDialog):
         column.addWidget(self.build_alerts())
         column.addWidget(self.build_session())
         column.addWidget(self.build_camera())
+        column.addWidget(self.build_overlay())
         column.addWidget(self.build_blocking())
         column.addWidget(self.build_jev())
         column.addStretch(1)
@@ -89,6 +91,7 @@ class SettingsDialog(QDialog):
         self.load(values)
         self.master.toggled.connect(self.update_enabled)
         self.camera_use.toggled.connect(self.update_enabled)
+        self.overlay_enabled.toggled.connect(self.update_enabled)
         self.volume.valueChanged.connect(lambda volume: self.volume_text.setText(f"{volume}%"))
         self.volume.valueChanged.connect(self.update_enabled)
         self.work.spin.valueChanged.connect(self.sync_presets)
@@ -101,7 +104,8 @@ class SettingsDialog(QDialog):
                               (self.strictness_box, self.work),
                               (self.work, self.rest), (self.rest, self.mode_box),
                               (self.mode_box, self.camera_use), (self.camera_use, self.preview_default),
-                              *self.blocking_tab_pairs(self.preview_default, self.jev_key), (self.jev_key, self.set_key_button),
+                              (self.preview_default, self.overlay_enabled), (self.overlay_enabled, self.overlay_corner),
+                              *self.blocking_tab_pairs(self.overlay_corner, self.jev_key), (self.jev_key, self.set_key_button),
                               (self.set_key_button, self.cancel_button), (self.cancel_button, self.save_button)):
             QWidget.setTabOrder(first, second)
         self.master.setFocus()
@@ -215,7 +219,8 @@ class SettingsDialog(QDialog):
 
     def build_alerts(self):
         box, layout = self.section("Phone and looking-away alerts", "A confirmed phone, looking away or being out of view "
-                                  "chimes after 3 seconds. Returning to your task stops looking-away alerts; "
+                                  "chimes after 3 seconds. Once the looking-away alarm starts, return to your task "
+                                  "for 2 continuous seconds to stop it; "
                                   "looking at paper in Computer + paper mode is allowed. "
                                   "Phone alerts stop when the phone leaves view. "
                                   "Uses the camera during work only; sound and check-in switches still apply.")
@@ -304,6 +309,19 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.preview_note)
         return box
 
+    def build_overlay(self):
+        box, layout = self.section("Overlay", "A small always-on-top pill with the time and your session timer and score. "
+                                              "It never uses the camera. Drag it to move it to another corner, or hide it "
+                                              "with its x button for now.")
+        self.overlay_enabled = checkbox("Show the overlay", "Show the overlay")
+        layout.addWidget(self.overlay_enabled)
+        self.overlay_corner = Dropdown()
+        self.overlay_corner.setAccessibleName("Overlay corner")
+        for text, key in CORNERS:
+            self.overlay_corner.addItem(text, key)
+        layout.addLayout(self.field("CORNER", self.overlay_corner))
+        return box
+
     def load(self, values):
         v = {**preferences.DEFAULTS, **values}
         self.master.setChecked(bool(v["sounds_enabled"]))
@@ -319,6 +337,8 @@ class SettingsDialog(QDialog):
         self.mode_box.setCurrentIndex(max(0, self.mode_box.findData(v["mode"])))
         self.camera_use.setChecked(bool(v["camera_enabled"]))
         self.preview_default.setChecked(bool(v["show_preview"]))
+        self.overlay_enabled.setChecked(bool(v["overlay_enabled"]))
+        self.overlay_corner.setCurrentIndex(max(0, self.overlay_corner.findData(v["overlay_corner"])))
         self.sites_editor.set_items(v["blocked_sites"])
         self.apps_editor.set_items(v["blocked_apps"])
 
@@ -330,6 +350,8 @@ class SettingsDialog(QDialog):
                 "alert_strictness": self.strictness_box.currentData(),
                 "break_minutes": self.rest.value(), "mode": self.mode_box.currentData(),
                 "camera_enabled": self.camera_use.isChecked(), "show_preview": self.preview_default.isChecked(),
+                "overlay_enabled": self.overlay_enabled.isChecked(),
+                "overlay_corner": self.overlay_corner.currentData(),
                 "blocked_sites": self.sites_editor.items(), "blocked_apps": self.apps_editor.items()}
 
     def update_enabled(self, *_):
@@ -341,6 +363,7 @@ class SettingsDialog(QDialog):
                                 "Volume is 0. Raise it to hear previews and cues.")
         self.sound_note.setVisible(not sound or self.volume.value() == 0)
         self.preview_default.setEnabled(self.camera_use.isChecked())
+        self.overlay_corner.setEnabled(self.overlay_enabled.isChecked())
 
     def use_preset(self, work, rest):
         self.work.setValue(work)

@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
+    QPushButton, QScrollArea, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -20,12 +20,13 @@ import preferences
 import sounds
 import study
 import tracking
+from overlay import Overlay
 from settings_dialog import SettingsDialog
-from phone_alerts import CameraAlerts, PhoneAlerts
+from phone_alerts import LookingAwayAlerts, PhoneAlerts
 from wellbeing import MAX_SAMPLE_GAP
 from widgets import (
     AWAY, BG, BREAK, GOOD, IDLE, LINE, MUTED, PAPER, PHONE, RAISED, SURFACE, TEXT,
-    Check, Dropdown, PreviewView, Ring, SplitBar, Trend, button, card, label, score_style,
+    Check, Dropdown, ElidedLabel, PreviewView, ProgressRing, Ring, SplitBar, Trend, button, card, label, score_style,
 )
 
 _STYLE = """
@@ -64,8 +65,9 @@ QPushButton#overlay { background: rgba(14, 17, 19, 200); border: 0; color: @TEXT
 QPushButton#overlay:hover { background: rgba(14, 17, 19, 245); }
 QPushButton#pill { padding: 8px 16px; color: @MUTED; }
 QPushButton#pill:checked { background: #1d3a31; border: 1px solid @GOOD; color: @TEXT; }
-QPushButton#chrome { background: @SURFACE; border: 1px solid @LINE; border-radius: 15px; padding: 6px 14px; font-weight: 500; font-size: 12px; color: @MUTED; }
+QPushButton#chrome, QLabel#activity { background: @SURFACE; border: 1px solid @LINE; border-radius: 13px; padding: 4px 10px; font-weight: 500; font-size: 12px; color: @MUTED; }
 QPushButton#chrome[ok='true'] { color: @TEXT; }
+QLabel#activity[ok='true'] { color: @TEXT; }
 QToolButton { background: transparent; border: 1px solid transparent; border-radius: 14px; padding: 4px 12px; color: @MUTED; font-size: 18px; }
 QToolButton:hover { background: @RAISED; color: @TEXT; }
 QToolButton:focus { border: 1px solid @GOOD; color: @TEXT; }
@@ -202,11 +204,17 @@ class FocusWindow(QMainWindow):
             self.prefs_unreadable = True
         self.sounds = sounds.SoundPlayer(self)
         self.phone_alerts = PhoneAlerts()
-        self.away_alerts = CameraAlerts()
+        self.away_alerts = LookingAwayAlerts()
         self.camera_alert_kind = None
         self.camera_sound_active = False
         self.camera_checkin_visible = False
         self.settings_dialog = None
+        self.overlay_hidden = False       # hidden with its x button: for this run only, Settings is the lasting switch
+        self.overlay = Overlay(self.prefs["overlay_corner"])
+        self.overlay.hide_requested.connect(self.hide_overlay)
+        self.overlay.open_requested.connect(self.bring_forward)
+        self.overlay.settings_requested.connect(self.open_settings)
+        self.overlay.corner_changed.connect(self.overlay_moved)
         self.preview_hidden = not self.prefs["show_preview"]
         self.last_tick = time.monotonic()
         self.last_frame = None
@@ -219,13 +227,22 @@ class FocusWindow(QMainWindow):
         root.setObjectName("root")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(32, 18, 32, 26)
-        outer.setSpacing(14)
-        header = QHBoxLayout()
+        outer.setContentsMargins(24, 10, 24, 24)
+        outer.setSpacing(8)
+        self.header = QWidget()
+        header = QHBoxLayout(self.header)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
         brand = label("●  EyeTrack", "brand")
         brand.setAccessibleName("EyeTrack")
         header.addWidget(brand)
         header.addStretch()
+        self.activity_status = ElidedLabel("○  Start a session to see activity", "activity")
+        self.activity_status.setAccessibleName("Current app or tab")
+        self.activity_status.setMinimumWidth(180)
+        self.activity_status.setMaximumWidth(360)
+        self.activity_status.setProperty("ok", False)
+        header.addWidget(self.activity_status, 1)
         self.connection = button("Chrome not connected", self.connection_help, "chrome")
         self.connection.setProperty("ok", False)
         header.addWidget(self.connection)
@@ -235,18 +252,17 @@ class FocusWindow(QMainWindow):
         self.menu_button.setAccessibleName("More options and settings")
         self.menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        for control in (self.activity_status, self.connection, self.menu_button):
+            control.setFixedHeight(28)
         self.build_menu()
         header.addWidget(self.menu_button)
-        outer.addLayout(header)
+        outer.addWidget(self.header)
         self.notice = label("", "notice")
+        self.notice.setParent(root)
         self.notice.setAccessibleName("Notice")
         self.notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.notice.setFixedHeight(self.notice.fontMetrics().height() + 20)
-        notice_policy = self.notice.sizePolicy()
-        notice_policy.setRetainSizeWhenHidden(True)
-        self.notice.setSizePolicy(notice_policy)
+        self.notice.setWordWrap(True)
         self.notice.hide()
-        outer.addWidget(self.notice, 0, Qt.AlignmentFlag.AlignHCenter)
         self.notice_timer = QTimer(self)
         self.notice_timer.setSingleShot(True)
         self.notice_timer.timeout.connect(self.notice.hide)
@@ -267,8 +283,10 @@ class FocusWindow(QMainWindow):
         self.frame_timer.setInterval(PREVIEW_FPS_MS)
         self.frame_timer.timeout.connect(self.update_frame)
         QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
+        QShortcut(QKeySequence("Ctrl+Shift+O"), self, self.toggle_overlay)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.escape_pressed)
         self.apply_defaults()
+        self.sync_overlay()
         if self.prefs_unreadable:
             self.show_notice("Couldn't read your saved settings, so the standard defaults are in use.", 10000)
         if start_timer:
@@ -301,6 +319,7 @@ class FocusWindow(QMainWindow):
         self.calibrate_action = menu.addAction("Calibrate screen…", self.calibrate_camera)
         menu.addAction("Tracking details…", self.diagnostics)
         self.preview_action = menu.addAction("Preview a check-in", self.preview_checkin)
+        self.overlay_action = menu.addAction("Hide overlay", self.toggle_overlay)
         menu.addSeparator()
         menu.addAction("Connect Chrome…", self.connection_help)
         menu.aboutToShow.connect(self.update_menu)
@@ -311,6 +330,10 @@ class FocusWindow(QMainWindow):
         live = bool(view and view["camera_enabled"] and view["phase"] == "work")
         self.calibrate_action.setEnabled(live and self.engine.camera["status"] == "ok" and not self.controller.simulated)
         self.preview_action.setEnabled(self.stack.currentIndex() == 1)
+        allowed = self.prefs["overlay_enabled"]
+        self.overlay_action.setEnabled(allowed)
+        self.overlay_action.setText("Overlay is off in Settings" if not allowed else
+                                    "Show overlay" if self.overlay_hidden else "Hide overlay")
 
     def build_toast(self, root):
         self.checkin = QFrame(root)
@@ -322,7 +345,12 @@ class FocusWindow(QMainWindow):
         self.checkin_title = label("A quick check-in", "section")
         self.checkin_message = label("", "", True)
         box.addWidget(self.checkin_title)
-        box.addWidget(self.checkin_message)
+        message_row = QHBoxLayout()
+        message_row.setSpacing(16)
+        self.lock_in_progress = ProgressRing()
+        message_row.addWidget(self.lock_in_progress)
+        message_row.addWidget(self.checkin_message, 1)
+        box.addLayout(message_row)
         actions = QHBoxLayout()
         actions.addWidget(button("Keep working", self.dismiss_checkin, "primary"))
         actions.addWidget(button("Take a break", self.take_break))
@@ -338,6 +366,8 @@ class FocusWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "notice") and self.notice.isVisible():
+            self.place_notice()
         if self.checkin_visible:
             self.place_toast()
 
@@ -510,21 +540,6 @@ class FocusWindow(QMainWindow):
         facts.addStretch()
         score_box.addLayout(facts)
         right.addWidget(score, 4)
-        self.activity_card, activity_box = card(spacing=6)
-        self.activity_card.setAccessibleName("Current app and tab")
-        self.activity_card.setContentsMargins(0, 0, 0, 0)
-        activity_box.setContentsMargins(18, 14, 18, 14)
-        activity_box.addWidget(label("CURRENT ACTIVITY", "eyebrow"))
-        self.active_app = label("Waiting for activity…", "section")
-        self.active_app.setAccessibleName("Current active app")
-        self.active_tab = label("Chrome not connected", "muted")
-        self.active_tab.setAccessibleName("Current browser tab")
-        # Plain text avoids interpreting page titles as markup; elision keeps this card compact.
-        for text in (self.active_app, self.active_tab):
-            text.setTextFormat(Qt.TextFormat.PlainText)
-            text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            activity_box.addWidget(text)
-        left.insertWidget(0, self.activity_card)
         body.addLayout(right, 4)
         self.session_error = label("", "muted", True)
         footer = QHBoxLayout()
@@ -555,7 +570,9 @@ class FocusWindow(QMainWindow):
         self.update_frame()
 
     def update_frame(self):
-        """Fast path: only swap the camera picture; text and numbers update in refresh()."""
+        """Swap the camera picture and smoothly paint the return-to-task progress."""
+        if not self.lock_in_progress.isHidden():
+            self.lock_in_progress.set_progress(self.away_alerts.recovery_progress(time.monotonic()))
         view = study.session_view()
         wanted = bool(view and view["phase"] == "work" and view["camera_enabled"]
                       and not self.preview_hidden and self.stack.currentIndex() == 1)
@@ -842,14 +859,60 @@ class FocusWindow(QMainWindow):
         self.apply_defaults(changed)
         if changed & {"blocked_sites", "blocked_apps"}:
             self.engine.set_blocklist(validated["blocked_sites"], validated["blocked_apps"])
+        if "overlay_enabled" in changed and validated["overlay_enabled"]:
+            self.overlay_hidden = False       # turning it back on in Settings means "show it now"
+        self.sync_overlay()
         if not self.prefs["sounds_enabled"] or not self.prefs["sound_checkins"] or not self.prefs["sound_volume"]:
             self.sounds.stop()
         self.show_notice("Settings saved. Sounds apply now, as does alert strictness; other defaults start with your next session.")
 
+    # ---------------------------------------------------------------- overlay
+    def sync_overlay(self):
+        """Show the overlay only when Settings allows it and it was not hidden with its x button."""
+        show = bool(self.prefs["overlay_enabled"]) and not self.overlay_hidden
+        if show:
+            self.overlay.set_corner(self.prefs["overlay_corner"])
+            self.overlay.update_state(study.session_view())
+        self.overlay.setVisible(show)
+
+    def hide_overlay(self):
+        self.overlay_hidden = True
+        self.sync_overlay()
+        self.show_notice("Overlay hidden. Bring it back from the ⋯ menu, or turn it off for good in Settings.")
+
+    def toggle_overlay(self):
+        if not self.prefs["overlay_enabled"]:
+            return
+        self.overlay_hidden = not self.overlay_hidden
+        self.sync_overlay()
+
+    def overlay_moved(self, corner):
+        """Dragging the overlay to another corner is remembered like any other setting."""
+        self.prefs = {**self.prefs, "overlay_corner": corner}
+        try:
+            preferences.save_preferences(self.prefs)
+        except (OSError, ValueError):
+            self.show_notice("Couldn't remember the overlay's new corner. It will move back next time.")
+
+    def bring_forward(self):
+        self.showNormal() if self.isMinimized() else self.show()
+        self.raise_()
+        self.activateWindow()
+
     def show_notice(self, text, milliseconds=6000):
         self.notice.setText(text)
         self.notice.show()
+        self.place_notice()
         self.notice_timer.start(milliseconds)
+
+    def place_notice(self):
+        """Float notices below the header without reserving empty dashboard space."""
+        root = self.centralWidget()
+        width = min(self.notice.fontMetrics().horizontalAdvance(self.notice.text()) + 32,
+                    640, root.width() - 48)
+        self.notice.setFixedSize(width, self.notice.heightForWidth(width))
+        self.notice.move((root.width() - width) // 2, self.header.geometry().bottom() + 8)
+        self.notice.raise_()
 
     def escape_pressed(self):
         if self.checkin_visible:
@@ -872,6 +935,7 @@ class FocusWindow(QMainWindow):
 
     def dismiss_checkin(self):
         self.checkin.hide()
+        self.lock_in_progress.set_progress(None)
         self.checkin_visible = False
         self.camera_checkin_visible = False
         if self.app_alert is not None:
@@ -917,6 +981,7 @@ class FocusWindow(QMainWindow):
         self.phone_alerts.reset()
         self.away_alerts.reset()
         self.camera_alert_kind = None
+        self.lock_in_progress.set_progress(None)
         if self.camera_checkin_visible:
             self.dismiss_checkin()
         if self.camera_sound_active:
@@ -929,18 +994,38 @@ class FocusWindow(QMainWindow):
                      and camera["status"] == "ok" and stamp is not None
                      and 0 <= now - stamp <= MAX_SAMPLE_GAP)
         kind = None
+        returning = False
         if fresh:
             if camera.get("phone") and not camera.get("phone_tentative"):
                 kind = "phone"
-            elif tracking.attention_bucket(camera, view["mode"], now) in ("away", "no_face"):
-                kind = "away"
+            else:
+                bucket = tracking.attention_bucket(camera, view["mode"], now)
+                if bucket in ("away", "no_face"):
+                    kind = "away"
+                elif bucket in ("screen", "paper") and self.camera_alert_kind == "away":
+                    kind, returning = "away", True
         if kind != self.camera_alert_kind or kind is None:
             self.stop_camera_alerts()
         self.camera_alert_kind = kind
         if kind is None:
             return
         alerts = self.phone_alerts if kind == "phone" else self.away_alerts
-        event = alerts.update(now, True, self.prefs["alert_strictness"])
+        event = alerts.update(now, not returning, self.prefs["alert_strictness"])
+        if alerts.since is None:
+            self.stop_camera_alerts()
+            return
+        progress = self.away_alerts.recovery_progress(now)
+        self.lock_in_progress.set_progress(progress)
+        if progress is not None:
+            self.show_checkin("Keep looking at your task for 2 continuous seconds. Let the ring fill to lock back in.",
+                              sound=False, count=False)
+            self.camera_checkin_visible = True
+            self.checkin_title.setText("Locking back in…")
+            self.place_toast()
+        elif self.checkin_title.text() == "Locking back in…":
+            self.checkin_title.setText("Return to your task")
+            self.checkin_message.setText("Return to your task for 2 continuous seconds to stop the looking-away alarm.")
+            self.place_toast()
         if event is None:
             return
         if kind == "phone":
@@ -949,8 +1034,9 @@ class FocusWindow(QMainWindow):
             title = "Phone check-in" if event == "checkin" else "Put your phone away"
         else:
             message = ("You've been looking away or out of view for 3 seconds. Ready to return to your task?"
-                       if event == "checkin" else "Still looking away or out of view. Return to your task to stop the alarm.")
-            title = "Looking-away check-in" if event == "checkin" else "Return to your task"
+                       if event == "checkin" else "Return to your task for 2 continuous seconds to stop the looking-away alarm.")
+            title = ("Locking back in…" if progress is not None else
+                     "Looking-away check-in" if event == "checkin" else "Return to your task")
         self.show_checkin(message, sound=False, count=event == "checkin")
         self.camera_checkin_visible = True
         self.checkin_title.setText(title)
@@ -969,6 +1055,8 @@ class FocusWindow(QMainWindow):
         self.engine.tick(dt)
         view = study.session_view()
         self.sync_camera(view)
+        if self.overlay.isVisible():
+            self.overlay.update_state(view)
         with self.engine.lock:
             camera, browser = dict(self.engine.camera), dict(self.engine.browser)
         self.refresh_camera_alerts(view, camera, now)
@@ -978,6 +1066,7 @@ class FocusWindow(QMainWindow):
             self.connection.setProperty("ok", connected)
             self.connection.style().unpolish(self.connection)
             self.connection.style().polish(self.connection)
+        self.refresh_activity(view, browser, connected)
         if view and self.stack.currentIndex() == 1:
             self.refresh_session(view, camera, browser, connected, now)
         while self.engine.events:
@@ -1022,7 +1111,6 @@ class FocusWindow(QMainWindow):
         self.fact_phone.setText(f"{view['counts']['phone']} phone")
         app_alerts = view["counts"].get("app", 0)
         self.fact_apps.setText(f"{app_alerts} app alert{'s' if app_alerts != 1 else ''}")
-        self.refresh_activity(view, browser, connected)
 
         # attention card and camera view
         if view["camera_enabled"]:
@@ -1035,21 +1123,30 @@ class FocusWindow(QMainWindow):
         self.refresh_wellbeing(view, camera, now)
 
     def refresh_activity(self, view, browser, connected):
-        front = connected and browser["category"] != "other"
-        current = view.get("current_app")
-        app_text = ("Chrome · " + SITE_TEXT.get(browser["category"], "site") if front else
-                    f"{current[0].title()} · {'distracting app' if current[1] else 'app'}" if current else
-                    "Active app unavailable")
-        if front:
+        available = False
+        if not view:
+            text = "Start a session to see activity"
+        elif view["phase"] != "work":
+            text = {"paused": "Activity paused", "break": "On a break", "complete": "Block complete"}[view["phase"]]
+        elif connected and browser["category"] != "other":
+            available = True
             title = browser.get("title", "")
-            tab_text = f"{browser['domain']} · {title}" if title else browser["domain"]
+            text = f"Chrome · {title or browser['domain']}"
+            detail = " · ".join(part for part in (text, browser["domain"], SITE_TEXT.get(browser["category"], "site")) if part)
+        elif view.get("current_app"):
+            available = True
+            name, distracting = view["current_app"]
+            text = f"{name.title()} · {'distracting app' if distracting else 'app'}"
+            detail = text
         else:
-            tab_text = "Chrome is in the background" if connected else "Chrome not connected"
-        for widget, text in ((self.active_app, app_text), (self.active_tab, tab_text)):
-            widget.setToolTip("<qt>" + escape(text) + "</qt>")
-            widget.setAccessibleDescription(text)
-            widget.setText(widget.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight,
-                                                          max(20, widget.width())))
+            text = "Active app unavailable"
+        self.activity_status.setText(("●  " if available else "○  ") + text)
+        self.activity_status.setToolTip("<qt>" + escape(detail if available else text) + "</qt>")
+        self.activity_status.setAccessibleDescription(detail if available else text)
+        if self.activity_status.property("ok") != available:
+            self.activity_status.setProperty("ok", available)
+            self.activity_status.style().unpolish(self.activity_status)
+            self.activity_status.style().polish(self.activity_status)
 
     def refresh_wellbeing(self, view, camera, now):
         visible = bool(view["camera_enabled"] and view["phase"] == "work" and not self.controller.simulated)
@@ -1162,6 +1259,7 @@ class FocusWindow(QMainWindow):
             return
         if self.settings_dialog is not None:
             self.settings_dialog.close()
+        self.overlay.close()
         try:
             self.sounds.stop()
         except Exception:

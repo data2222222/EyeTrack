@@ -581,6 +581,10 @@ def test_looking_away_uses_strictness_and_stops_on_return(window, monkeypatch, m
     assert study.session_view()["counts"] == counts
     engine.camera.update(present=True, facing=True)
     w.refresh()
+    assert w.checkin_visible and not stopped
+    for _ in range(2):
+        clock[0] += 1
+        w.refresh()
     assert not w.checkin_visible and w.away_alerts.since is None and stopped
     assert study.session_view()["phase"] == "work"
 
@@ -616,8 +620,119 @@ def test_looking_away_alerts_reset_when_inactive_or_unobserved(window, monkeypat
         view = dict(view, mode="both")
         camera["looking_down"] = True
     w.refresh_camera_alerts(view, camera, now)
+    if reason in ("screen", "paper"):
+        assert w.checkin_visible and not stopped
+        for i in (1, 2):
+            camera["observed_at"] = now + i
+            w.refresh_camera_alerts(view, camera, now + i)
     assert played == ["checkin", "alarm"]
     assert w.away_alerts.since is None and stopped and not w.checkin_visible
+
+
+@pytest.mark.parametrize("on_paper", [False, True])
+def test_brief_return_does_not_clear_looking_away_alarm(window, monkeypatch, on_paper):
+    w, clock = window
+    w.start_button.click()
+    w.prefs["alert_strictness"] = "asian_parent"
+    if on_paper:
+        study.session["mode"] = "both"
+    engine.camera.update(present=True, facing=False, looking_down=False, phone=False)
+    played, stopped = [], []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    monkeypatch.setattr(w.sounds, "stop", lambda: stopped.append(True))
+    w.refresh()
+    for _ in range(10):
+        clock[0] += 1
+        w.refresh()
+    assert played == ["checkin", "alarm"]
+    engine.camera.update(facing=not on_paper, looking_down=on_paper)
+    for _ in range(2):
+        clock[0] += .5
+        w.refresh()
+    assert played == ["checkin", "alarm", "alarm"]
+    assert w.checkin_visible and not stopped
+    # Looking away again restarts the two-second return requirement.
+    engine.camera.update(facing=False, looking_down=False)
+    clock[0] += .5
+    w.refresh()
+    engine.camera.update(facing=not on_paper, looking_down=on_paper)
+    for _ in range(4):
+        clock[0] += .5
+        w.refresh()
+    assert w.checkin_visible and not stopped
+    assert "2 continuous seconds" in w.checkin_message.text()
+    clock[0] += .5
+    w.refresh()
+    assert not w.checkin_visible and stopped and w.away_alerts.since is None
+
+
+def test_lock_in_ring_fills_during_return_and_restarts_after_looking_away(window, monkeypatch):
+    w, clock = window
+    w.start_button.click()
+    w.prefs["alert_strictness"] = "asian_parent"
+    engine.camera.update(present=True, facing=False, looking_down=False, phone=False)
+    monkeypatch.setattr(w, "play_sound", lambda event: None)
+    w.refresh()
+    for _ in range(10):
+        clock[0] += 1
+        w.refresh()
+    counts = study.session_view()["counts"].copy()
+    assert w.lock_in_progress.isHidden()
+    w.dismiss_checkin()
+    engine.camera["facing"] = True
+    clock[0] += .25
+    w.refresh()
+    assert w.checkin_visible
+    assert w.lock_in_progress.isVisibleTo(w)
+    assert w.lock_in_progress.fraction == 0
+    assert w.checkin_title.text() == "Locking back in…"
+    clock[0] += .5
+    w.update_frame()  # Progress paints between the slower session/alert refreshes.
+    assert w.lock_in_progress.fraction == .25
+    clock[0] += .5
+    w.refresh()
+    assert w.lock_in_progress.fraction == .5
+    assert w.checkin_title.text() == "Locking back in…"
+    assert "50 percent" in w.lock_in_progress.accessibleDescription()
+    engine.camera["facing"] = False
+    clock[0] += .25
+    w.refresh()
+    assert w.lock_in_progress.isHidden()
+    assert w.checkin_title.text() == "Return to your task"
+    engine.camera["facing"] = True
+    clock[0] += .25
+    w.refresh()
+    assert w.lock_in_progress.fraction == 0
+    for _ in range(2):
+        clock[0] += 1
+        w.refresh()
+    assert w.lock_in_progress.isHidden() and not w.checkin_visible
+    assert study.session_view()["counts"] == counts
+
+
+@pytest.mark.parametrize("reason", ["pause", "stale", "phone"])
+def test_lock_in_ring_clears_when_recovery_is_interrupted(window, monkeypatch, reason):
+    w, clock = window
+    w.start_button.click()
+    monkeypatch.setattr(w, "play_sound", lambda event: None)
+    view = study.session_view()
+    camera = dict(engine.camera, status="ok", present=True, facing=False, phone=False, looking_down=False)
+    for i in range(16):
+        camera["observed_at"] = clock[0] + i
+        w.refresh_camera_alerts(view, camera, clock[0] + i)
+    now = clock[0] + 15.5
+    camera.update(facing=True, observed_at=now)
+    w.refresh_camera_alerts(view, camera, now)
+    assert w.lock_in_progress.isVisibleTo(w)
+    if reason == "pause":
+        view = dict(view, phase="paused")
+    elif reason == "stale":
+        camera["observed_at"] = now - 2
+    else:
+        camera.update(phone=True, phone_tentative=False)
+    w.refresh_camera_alerts(view, camera, now)
+    assert w.lock_in_progress.isHidden()
+    assert not w.checkin_visible
 
 
 def test_looking_away_strictness_changes_and_switching_to_phone_restarts_timer(window, monkeypatch):

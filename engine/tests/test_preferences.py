@@ -31,7 +31,7 @@ def test_malformed_files_fall_back_to_defaults(tmp_path, content):
 
 
 @pytest.mark.parametrize("name", [
-    "sounds_enabled", "sound_checkins", "sound_completion", "camera_enabled", "show_preview",
+    "sounds_enabled", "sound_checkins", "sound_completion", "camera_enabled", "show_preview", "overlay_enabled",
 ])
 @pytest.mark.parametrize("value", [0, 1, "false", None, [], {}])
 def test_booleans_require_actual_booleans(name, value):
@@ -52,6 +52,7 @@ def test_integer_bounds_reject_bad_values_without_coercion(name, minimum, maximu
 @pytest.mark.parametrize("name,choices", [
     ("mode", ("pc", "both")), ("sound_style", ("chime", "bell", "soft")),
     ("alert_strictness", ("light", "strict", "asian_parent")),
+    ("overlay_corner", ("top_right", "top_left", "bottom_right", "bottom_left")),
 ])
 def test_choices_are_validated(name, choices):
     for value in choices:

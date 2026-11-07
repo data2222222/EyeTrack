@@ -17,7 +17,16 @@ def audio(monkeypatch):
     sink, buffer = Mock(), Mock()
     start = Mock(return_value=(sink, buffer))
     monkeypatch.setattr(sounds, "_start_audio", start)
+    monkeypatch.setattr(sounds, "_start_file", Mock(return_value=None))   # recorded alarm unavailable: synthesized fallback
     return start, sink, buffer
+
+
+@pytest.fixture
+def alarm_file(monkeypatch):
+    player, output = Mock(), Mock()
+    start = Mock(return_value=(player, output))
+    monkeypatch.setattr(sounds, "_start_file", start)
+    return start, player, output
 
 
 def test_import_and_construction_do_not_import_qt_or_open_hardware():
@@ -216,3 +225,57 @@ def test_qt_backend_failure_releases_partial_resources(qt_audio):
     assert not sounds.SoundPlayer().play("completion", {})
     sink.stop.assert_called_once()
     buffer.close.assert_called_once()
+
+
+def test_alarm_file_ships_with_the_app():
+    assert sounds.ALARM_FILE.is_file() and sounds.ALARM_FILE.stat().st_size > 10_000
+
+
+@pytest.mark.parametrize("mode", ["strict", "asian_parent"])
+def test_hard_alarm_modes_play_the_recorded_beep(audio, alarm_file, mode):
+    start, player, output = alarm_file
+    parent = object()
+    sound = sounds.SoundPlayer(parent)
+    assert sound.play("alarm", {"alert_strictness": mode, "sound_volume": 80})
+    path, volume, passed_parent, on_error = start.call_args.args
+    assert path == sounds.ALARM_FILE and volume == 80 and passed_parent is parent
+    audio[0].assert_not_called()
+    sound.stop()
+    player.stop.assert_called_once()
+    output.deleteLater.assert_called_once()
+
+
+def test_light_mode_and_other_events_keep_the_synthesized_sounds(audio, alarm_file):
+    assert sounds.SoundPlayer().play("alarm", {"alert_strictness": "light"})
+    assert sounds.SoundPlayer().play("checkin", {"alert_strictness": "strict"})
+    alarm_file[0].assert_not_called()
+    assert audio[0].call_count == 2
+
+
+def test_missing_or_undecodable_alarm_file_falls_back_to_the_synthesized_burst(audio, alarm_file):
+    alarm_file[0].return_value = None
+    assert sounds.SoundPlayer().play("alarm", {"alert_strictness": "strict"})
+    assert audio[0].call_count == 1
+    alarm_file[0].side_effect = RuntimeError("no multimedia")
+    assert sounds.SoundPlayer().play("alarm", {"alert_strictness": "asian_parent"})
+    assert audio[0].call_count == 2
+
+
+def test_playback_error_after_start_swaps_in_the_synthesized_burst(audio, alarm_file):
+    start, player, _ = alarm_file
+    sound = sounds.SoundPlayer()
+    assert sound.play("alarm", {"alert_strictness": "strict", "sound_volume": 50})
+    on_error = start.call_args.args[3]
+    on_error(Mock())                        # some other player's error is ignored
+    audio[0].assert_not_called()
+    on_error(player)
+    player.stop.assert_called_once()
+    assert audio[0].call_args.args[1] == 50
+    on_error(player)                        # and it only happens once
+    assert audio[0].call_count == 1
+
+
+@pytest.mark.parametrize("settings", [{"sounds_enabled": False}, {"sound_volume": 0}, {"sound_checkins": False}])
+def test_recorded_alarm_honours_mute_volume_and_checkin_toggle(alarm_file, settings):
+    assert not sounds.SoundPlayer().play("alarm", {"alert_strictness": "strict", **settings})
+    alarm_file[0].assert_not_called()
