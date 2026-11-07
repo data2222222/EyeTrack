@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea, QWidget
 
 import engine
 import preferences
@@ -335,7 +335,10 @@ def test_settings_fit_without_horizontal_overflow_or_clipped_actions(window, app
     app.processEvents()
     scroll = dialog.findChild(QScrollArea)
     assert not scroll.horizontalScrollBar().isVisible()
-    assert scroll.widget().width() <= scroll.viewport().width()
+    constraints = [(type(control).__name__, control.accessibleName(), control.minimumSizeHint().width(),
+                    control.font().toString()) for control in scroll.widget().findChildren(QWidget)
+                   if control.minimumSizeHint().width() > 150]
+    assert scroll.widget().width() <= scroll.viewport().width(), constraints
     bounds = dialog.rect()
     for button in (dialog.cancel_button, dialog.save_button):
         assert button.isVisible() and bounds.contains(button.geometry())

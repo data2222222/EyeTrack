@@ -161,10 +161,10 @@ class SettingsDialog(QDialog):
         layout.addLayout(row)
 
         self.checkins = checkbox("Play a cue for check-ins", "Cue for check-ins")
-        self.completion = checkbox("Play a cue when a focus block is complete", "Cue when a focus block is complete")
+        self.completion = checkbox("Play block-completion cues", "Cue when a focus block is complete")
         layout.addWidget(self.checkins)
         layout.addWidget(self.completion)
-        self.sound_note = label("Turn on sounds to hear previews.", "muted")
+        self.sound_note = label("Turn on sounds to hear previews.", "muted", True)
         layout.addWidget(self.sound_note)
         return box
 
@@ -199,8 +199,8 @@ class SettingsDialog(QDialog):
         box, layout = self.section("Camera", "The camera is never turned on from Settings. It starts only when a "
                                              "session with the camera begins its focus time, and stops on pause, "
                                              "break or end.")
-        self.camera_use = checkbox("Use the camera by default", "Use the camera by default")
-        self.preview_default = checkbox("Show the camera picture by default", "Show the camera picture by default")
+        self.camera_use = checkbox("Use camera by default", "Use the camera by default")
+        self.preview_default = checkbox("Show camera picture", "Show the camera picture by default")
         layout.addWidget(self.camera_use)
         layout.addWidget(self.preview_default)
         self.preview_note = label("Hiding the picture only hides it. Tracking continues, and frames are never "

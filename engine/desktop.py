@@ -26,7 +26,7 @@ from widgets import (
 )
 
 _STYLE = """
-QWidget { color: @TEXT; font-family: 'Inter', 'DejaVu Sans', sans-serif; font-size: 13px; }
+QWidget { color: @TEXT; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', sans-serif; font-size: 13px; }
 QMainWindow, QDialog, QScrollArea, QWidget#page, QWidget#root { background: @BG; }
 QLabel { background: transparent; }
 QLabel#brand { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
@@ -41,7 +41,7 @@ QLabel#word { font-size: 15px; font-weight: 650; }
 QLabel#stat { font-size: 22px; font-weight: 600; }
 QLabel#error { color: #ff8fb0; background: #2a1820; border: 1px solid #5c2a3c; border-radius: 12px; padding: 10px 14px; }
 QLabel#notice { color: @TEXT; background: #16302a; border: 1px solid #2c5f4e; border-radius: 14px; padding: 8px 16px; }
-QLabel#mono { font-family: 'JetBrains Mono', 'DejaVu Sans Mono', monospace; }
+QLabel#mono { font-family: 'JetBrains Mono', 'DejaVu Sans Mono', 'Menlo', 'Consolas', monospace; }
 QFrame#card { background: @SURFACE; border: 1px solid @LINE; border-radius: 18px; }
 QFrame#toast { background: @RAISED; border: 1px solid @AWAY; border-radius: 16px; }
 QPushButton { background: @RAISED; border: 1px solid @LINE; border-radius: 12px; padding: 10px 18px; font-weight: 600; }
