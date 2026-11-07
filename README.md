@@ -37,6 +37,23 @@ python engine.py                   # first run downloads 2 small models (~10 MB)
 Extension: `chrome://extensions` > **Developer mode** > **Load unpacked** > select `extension/`.
 </details>
 
+## Developer testing
+
+Run the extension regression tests from the repository root with Node.js 18 or newer:
+
+```bash
+node --test extension/tests/*.test.js
+```
+
+These dependency-free tests execute the actual background script with mocked Chrome APIs,
+local-engine responses, and a deterministic clock. They cover delayed page titles, URL and
+incognito privacy, and engine-unavailable fail-open behavior without Chrome or a running engine.
+No npm install, model downloads, camera, or network access is needed.
+
+After development setup, run the Python suite with `engine/.venv/bin/python -m pytest engine/tests -q`
+(Windows: `engine\.venv\Scripts\python.exe -m pytest engine/tests -q`). Install `pytest` in that
+environment first if needed. CI runs Python tests on all three platforms and extension tests on Linux.
+
 ## Platforms
 
 Windows, macOS and Linux run the same code (CI tests all three on Python 3.12). Use Python 3.10 to 3.14.
