@@ -7,23 +7,26 @@ import sys
 import time
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QFont, QImage, QPixmap
+from PySide6.QtGui import QFont, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QDialog, QFrame, QGridLayout,
+    QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
+import preferences
+import sounds
 import study
+from settings_dialog import SettingsDialog
 from wellbeing import MAX_SAMPLE_GAP
 from widgets import (
     AWAY, BG, BREAK, GOOD, IDLE, LINE, MUTED, PAPER, PHONE, RAISED, SURFACE, TEXT,
-    Dropdown, PreviewView, Ring, SplitBar, Trend, score_style,
+    Check, Dropdown, PreviewView, Ring, SplitBar, Trend, button, card, label, score_style,
 )
 
 _STYLE = """
-QWidget { color: @TEXT; font-family: 'Inter', 'DejaVu Sans', sans-serif; font-size: 13px; }
+QWidget { color: @TEXT; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', 'DejaVu Sans', sans-serif; font-size: 13px; }
 QMainWindow, QDialog, QScrollArea, QWidget#page, QWidget#root { background: @BG; }
 QLabel { background: transparent; }
 QLabel#brand { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
@@ -36,13 +39,18 @@ QLabel#goal { font-size: 16px; font-weight: 600; }
 QLabel#score { font-size: 64px; font-weight: 600; }
 QLabel#word { font-size: 15px; font-weight: 650; }
 QLabel#stat { font-size: 22px; font-weight: 600; }
-QLabel#mono { font-family: 'JetBrains Mono', 'DejaVu Sans Mono', monospace; }
+QLabel#error { color: #ff8fb0; background: #2a1820; border: 1px solid #5c2a3c; border-radius: 12px; padding: 10px 14px; }
+QLabel#notice { color: @TEXT; background: #16302a; border: 1px solid #2c5f4e; border-radius: 14px; padding: 8px 16px; }
+QLabel#mono { font-family: 'JetBrains Mono', 'DejaVu Sans Mono', 'Menlo', 'Consolas', monospace; }
 QFrame#card { background: @SURFACE; border: 1px solid @LINE; border-radius: 18px; }
 QFrame#toast { background: @RAISED; border: 1px solid @AWAY; border-radius: 16px; }
 QPushButton { background: @RAISED; border: 1px solid @LINE; border-radius: 12px; padding: 10px 18px; font-weight: 600; }
 QPushButton:hover { background: #283036; border-color: #3a454c; }
 QPushButton:pressed { background: #20272b; }
-QPushButton:focus, QLineEdit:focus, QComboBox:focus { border: 1px solid @GOOD; }
+QPushButton:focus, QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid @GOOD; }
+QPushButton#primary:focus { border: 2px solid #c9f5e6; }
+QPushButton#step { padding: 0; font-size: 18px; font-weight: 500; color: @MUTED; border-radius: 20px; }
+QPushButton#step:hover { color: @TEXT; }
 QPushButton:disabled { color: #5b676e; background: #14181a; border-color: #20272b; }
 QPushButton#primary { background: @GOOD; color: #07140e; border: 1px solid @GOOD; padding: 12px 22px; }
 QPushButton#primary:hover { background: #6be0b8; }
@@ -55,8 +63,9 @@ QPushButton#pill { padding: 8px 16px; color: @MUTED; }
 QPushButton#pill:checked { background: #1d3a31; border: 1px solid @GOOD; color: @TEXT; }
 QPushButton#chrome { background: @SURFACE; border: 1px solid @LINE; border-radius: 15px; padding: 6px 14px; font-weight: 500; font-size: 12px; color: @MUTED; }
 QPushButton#chrome[ok='true'] { color: @TEXT; }
-QToolButton { background: transparent; border: 0; border-radius: 12px; padding: 6px 12px; color: @MUTED; font-size: 18px; }
+QToolButton { background: transparent; border: 1px solid transparent; border-radius: 14px; padding: 4px 12px; color: @MUTED; font-size: 18px; }
 QToolButton:hover { background: @RAISED; color: @TEXT; }
+QToolButton:focus { border: 1px solid @GOOD; color: @TEXT; }
 QToolButton::menu-indicator { image: none; width: 0; }
 QMenu { background: @RAISED; border: 1px solid @LINE; border-radius: 12px; padding: 6px; }
 QMenu::item { padding: 8px 20px; border-radius: 8px; }
@@ -67,9 +76,26 @@ QComboBox { background: @SURFACE; border: 1px solid @LINE; border-radius: 12px; 
 QComboBox:hover { border-color: #3a454c; }
 QComboBox::drop-down { border: 0; width: 0; }
 QComboBox QAbstractItemView { background: @RAISED; border: 1px solid @LINE; selection-background-color: #2b343a; selection-color: @TEXT; outline: 0; padding: 4px; }
-QCheckBox { spacing: 10px; color: @MUTED; }
+QCheckBox { spacing: 10px; color: @MUTED; padding: 3px 0; }
+QCheckBox#option { color: @TEXT; font-weight: 550; padding: 5px 0; }
+QCheckBox:disabled, QCheckBox#option:disabled { color: #5b676e; }
 QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #3a454c; border-radius: 6px; background: @SURFACE; }
+QCheckBox::indicator:hover { border-color: #5b676e; }
 QCheckBox::indicator:checked { background: @GOOD; border: 1px solid @GOOD; }
+QCheckBox::indicator:focus { border: 2px solid #c9f5e6; }
+QCheckBox::indicator:disabled { background: #14181a; border-color: #20272b; }
+QCheckBox::indicator:checked:disabled { background: #1f3a31; border-color: #1f3a31; }
+QSpinBox QLineEdit { background: transparent; border: 0; padding: 0; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0; border: 0; }
+QSpinBox { background: @SURFACE; border: 1px solid @LINE; border-radius: 12px; padding: 9px 4px; font-size: 15px; font-weight: 600; selection-background-color: #2f5f4e; }
+QSlider::groove:horizontal { height: 6px; background: @RAISED; border-radius: 3px; }
+QSlider::sub-page:horizontal { background: @GOOD; border-radius: 3px; }
+QSlider::sub-page:horizontal:disabled { background: #1f3a31; }
+QSlider::handle:horizontal { width: 18px; height: 18px; margin: -6px 0; background: @TEXT; border-radius: 9px; }
+QSlider::handle:horizontal:focus { background: #c9f5e6; border: 2px solid @GOOD; }
+QSlider::handle:horizontal:disabled { background: #3a454c; }
+QComboBox:disabled { color: #5b676e; background: #14181a; border-color: #20272b; }
+QLabel:disabled { color: #5b676e; }
 QScrollArea { border: 0; }
 QScrollBar:vertical { background: transparent; width: 8px; }
 QScrollBar::handle:vertical { background: #2c353a; border-radius: 4px; min-height: 30px; }
@@ -87,33 +113,6 @@ CHIPS = {"screen": ("On screen", GOOD), "paper": ("On paper", PAPER), "away": ("
          "no_face": ("Out of view", AWAY), "phone": ("On phone", PHONE)}
 SITE_TEXT = {"productive": "work site", "neutral": "unlisted site", "distraction": "distracting site",
              "other": "another app"}
-
-
-def label(text="", name="", wrap=False):
-    w = QLabel(text)
-    w.setObjectName(name)
-    w.setWordWrap(wrap)
-    w.setTextFormat(Qt.TextFormat.PlainText)
-    return w
-
-
-def button(text, action=None, name="", checkable=False):
-    w = QPushButton(text)
-    w.setObjectName(name)
-    w.setCheckable(checkable)
-    w.setCursor(Qt.CursorShape.PointingHandCursor)
-    if action:
-        w.clicked.connect(action)
-    return w
-
-
-def card(margins=(22, 20, 22, 20), spacing=12):
-    w = QFrame()
-    w.setObjectName("card")
-    layout = QVBoxLayout(w)
-    layout.setContentsMargins(*margins)
-    layout.setSpacing(spacing)
-    return w, layout
 
 
 def tint(widget, color):
@@ -192,14 +191,22 @@ class FocusWindow(QMainWindow):
         self.report = None
         self.checkin_visible = False
         self.app_alert = None
-        self.preview_hidden = False
+        self.prefs_unreadable = False
+        try:
+            self.prefs = preferences.load_preferences()
+        except OSError:
+            self.prefs = dict(preferences.DEFAULTS)
+            self.prefs_unreadable = True
+        self.sounds = sounds.SoundPlayer(self)
+        self.settings_dialog = None
+        self.preview_hidden = not self.prefs["show_preview"]
         self.last_tick = time.monotonic()
         self.last_frame = None
         self.setWindowTitle("EyeTrack")
         self.resize(1120, 740)
         self.setMinimumSize(900, 660)
         self.setStyleSheet(STYLE)
-        self.engine.show_preview = True
+        self.engine.show_preview = self.prefs["show_preview"]
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
@@ -207,19 +214,34 @@ class FocusWindow(QMainWindow):
         outer.setContentsMargins(32, 18, 32, 26)
         outer.setSpacing(14)
         header = QHBoxLayout()
-        header.addWidget(label("●  EyeTrack", "brand"))
+        brand = label("●  EyeTrack", "brand")
+        brand.setAccessibleName("EyeTrack")
+        header.addWidget(brand)
         header.addStretch()
         self.connection = button("Chrome not connected", self.connection_help, "chrome")
         self.connection.setProperty("ok", False)
         header.addWidget(self.connection)
         self.menu_button = QToolButton()
         self.menu_button.setText("⋯")
-        self.menu_button.setToolTip("Calibration and tracking details")
+        self.menu_button.setToolTip("Settings, calibration and tracking details (Ctrl+,)")
+        self.menu_button.setAccessibleName("More options and settings")
         self.menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.build_menu()
         header.addWidget(self.menu_button)
         outer.addLayout(header)
+        self.notice = label("", "notice")
+        self.notice.setAccessibleName("Notice")
+        self.notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notice.setFixedHeight(self.notice.fontMetrics().height() + 20)
+        notice_policy = self.notice.sizePolicy()
+        notice_policy.setRetainSizeWhenHidden(True)
+        self.notice.setSizePolicy(notice_policy)
+        self.notice.hide()
+        outer.addWidget(self.notice, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.notice_timer = QTimer(self)
+        self.notice_timer.setSingleShot(True)
+        self.notice_timer.timeout.connect(self.notice.hide)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack, 1)
         self.setup_page = self.page()
@@ -236,6 +258,11 @@ class FocusWindow(QMainWindow):
         self.frame_timer = QTimer(self)
         self.frame_timer.setInterval(PREVIEW_FPS_MS)
         self.frame_timer.timeout.connect(self.update_frame)
+        QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.escape_pressed)
+        self.apply_defaults()
+        if self.prefs_unreadable:
+            self.show_notice("Couldn't read your saved settings, so the standard defaults are in use.", 10000)
         if start_timer:
             self.timer.start()
             self.frame_timer.start()
@@ -261,6 +288,8 @@ class FocusWindow(QMainWindow):
 
     def build_menu(self):
         menu = QMenu(self.menu_button)
+        self.settings_action = menu.addAction("Settings…", self.open_settings)
+        menu.addSeparator()
         self.calibrate_action = menu.addAction("Calibrate screen…", self.calibrate_camera)
         menu.addAction("Tracking details…", self.diagnostics)
         self.preview_action = menu.addAction("Preview a check-in", self.preview_checkin)
@@ -311,17 +340,18 @@ class FocusWindow(QMainWindow):
         row.addStretch(1)
         column = QVBoxLayout()
         column.setSpacing(14)
-        column.addSpacing(34)
+        column.addStretch(1)
         column.addWidget(label("Start a focus session", "title"))
         self.setup_summary = label("", "subtitle")
         column.addWidget(self.setup_summary)
-        column.addSpacing(10)
+        column.addSpacing(6)
+        form, form_box = card(margins=(24, 24, 24, 22), spacing=14)
         self.goal_input = QLineEdit()
         self.goal_input.setPlaceholderText("What are you working on? (optional)")
         self.goal_input.setMaxLength(140)
         self.goal_input.setAccessibleName("Session goal, optional")
         self.goal_input.returnPressed.connect(self.start_session)
-        column.addWidget(self.goal_input)
+        form_box.addWidget(self.goal_input)
         options = QHBoxLayout()
         options.setSpacing(12)
         self.mode_box = Dropdown()
@@ -331,40 +361,46 @@ class FocusWindow(QMainWindow):
         self.rhythm_box = Dropdown()
         self.rhythm_box.setAccessibleName("Focus and break length")
         for work, rest in study.RHYTHMS:
-            self.rhythm_box.addItem(f"{work} min focus · {rest} min break", (work, rest))
+            self.rhythm_box.addItem(self.rhythm_text(work, rest), (work, rest))
         for caption, box in (("WORKING WITH", self.mode_box), ("RHYTHM", self.rhythm_box)):
             cell = QVBoxLayout()
             cell.setSpacing(6)
-            cell.addWidget(label(caption, "eyebrow"))
+            title = label(caption, "eyebrow")
+            title.setBuddy(box)
+            cell.addWidget(title)
             cell.addWidget(box)
             options.addLayout(cell, 1)
-        column.addLayout(options)
+        form_box.addLayout(options)
         self.mode_note = label("Looking down at paper counts as on task.", "muted", True)
-        column.addWidget(self.mode_note)
-        self.camera_toggle = QCheckBox("Use the camera to follow where I look")
+        form_box.addWidget(self.mode_note)
+        self.camera_toggle = Check("Use the camera to follow where I look", "Use the camera")
+        self.camera_toggle.setObjectName("option")
         self.camera_toggle.setChecked(True)
-        column.addWidget(self.camera_toggle)
-        column.addSpacing(6)
-        self.setup_error = label("", "muted", True)
+        form_box.addWidget(self.camera_toggle)
+        self.privacy_note = label("Camera frames stay on this computer and are never saved.", "muted", True)
+        form_box.addWidget(self.privacy_note)
+        column.addWidget(form)
+        self.setup_error = label("", "error", True)
+        self.setup_error.setAccessibleName("Start error")
         self.setup_error.hide()
         column.addWidget(self.setup_error)
         self.start_button = button("", self.start_session, "primary")
-        self.start_button.setMinimumHeight(48)
+        self.start_button.setMinimumHeight(50)
         column.addWidget(self.start_button)
-        self.privacy_note = label("Camera frames stay on this computer and are never saved.", "muted")
-        self.privacy_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        column.addWidget(self.privacy_note)
-        column.addSpacing(10)
+        column.addSpacing(4)
         self.last_session = label("", "muted")
         self.last_session.setAlignment(Qt.AlignmentFlag.AlignCenter)
         column.addWidget(self.last_session)
-        column.addStretch(1)
+        self.settings_link = button("Settings and sound", self.open_settings, "quiet")
+        self.settings_link.setAccessibleName("Open settings")
+        column.addWidget(self.settings_link, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addStretch(2)
         holder = QWidget()
-        holder.setMaximumWidth(540)
+        holder.setMaximumWidth(560)
         holder.setLayout(column)
         row.addWidget(holder, 4)
         row.addStretch(1)
-        layout.addLayout(row)
+        layout.addLayout(row, 1)
         self.mode_box.currentIndexChanged.connect(self.update_setup)
         self.rhythm_box.currentIndexChanged.connect(self.update_setup)
         self.camera_toggle.toggled.connect(self.update_setup)
@@ -601,8 +637,8 @@ class FocusWindow(QMainWindow):
         self.engine.events.clear()
         self.engine.reset_wellbeing()
         self.session_error.clear()
-        self.preview_hidden = False
-        self.engine.show_preview = True
+        self.preview_hidden = not self.prefs["show_preview"]
+        self.engine.show_preview = self.prefs["show_preview"]
         self.last_frame = None
         self.preview.set_frame(None)
         self.navigate(1)
@@ -734,6 +770,73 @@ class FocusWindow(QMainWindow):
         self.goal_input.clear()
         self.navigate(0)
 
+    def apply_defaults(self, changed=None):
+        """Point the setup screen at the saved defaults; a running session and the camera are never touched."""
+        prefs = self.prefs
+        changed = set(prefs) if changed is None else set(changed)
+        if changed & {"work_minutes", "break_minutes"}:
+            self.set_rhythm(prefs["work_minutes"], prefs["break_minutes"])
+        if "mode" in changed:
+            self.mode_box.setCurrentIndex(max(0, self.mode_box.findData(prefs["mode"])))
+        if "camera_enabled" in changed:
+            self.camera_toggle.setChecked(bool(prefs["camera_enabled"]))
+        self.update_setup()
+
+    def set_rhythm(self, work, rest):
+        """Select a standard rhythm, or keep one extra 'custom' entry (always last) for a saved custom length."""
+        box = self.rhythm_box
+        standard = len(study.RHYTHMS)
+        while box.count() > standard:
+            box.removeItem(box.count() - 1)
+        if (work, rest) in study.RHYTHMS:
+            box.setCurrentIndex(study.RHYTHMS.index((work, rest)))
+        else:
+            box.addItem(self.rhythm_text(work, rest), (work, rest))
+            box.setCurrentIndex(box.count() - 1)
+
+    @staticmethod
+    def rhythm_text(work, rest):
+        return f"{work} min focus · {rest} min break"
+
+    def open_settings(self):
+        if self.settings_dialog is not None:
+            self.settings_dialog.raise_()
+            self.settings_dialog.activateWindow()
+            return
+        dialog = SettingsDialog(self.prefs, self, sound_player=self.sounds)
+        dialog.saved.connect(self.settings_saved)
+        dialog.finished.connect(self.forget_settings)
+        self.settings_dialog = dialog
+        dialog.open()
+
+    def forget_settings(self, *_):
+        dialog, self.settings_dialog = self.settings_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def settings_saved(self, values):
+        validated = preferences.validate_preferences(values)
+        changed = {name for name, value in validated.items() if value != self.prefs[name]}
+        self.prefs = validated
+        self.apply_defaults(changed)
+        self.show_notice("Settings saved. Sounds apply now; other defaults start with your next session.")
+
+    def show_notice(self, text, milliseconds=6000):
+        self.notice.setText(text)
+        self.notice.show()
+        self.notice_timer.start(milliseconds)
+
+    def escape_pressed(self):
+        if self.checkin_visible:
+            self.dismiss_checkin()
+
+    def play_sound(self, event):
+        """A cue never breaks the session: audio problems are ignored."""
+        try:
+            self.sounds.play(event, self.prefs)
+        except Exception:
+            pass
+
     def calibrate_camera(self):
         from camera_calibration import show_calibration
         self.engine.reset_calibration(guided=True)
@@ -780,6 +883,7 @@ class FocusWindow(QMainWindow):
         if not preview:
             study.record_event("nudge")
             QApplication.alert(self)
+            self.play_sound("checkin")
 
     # ---------------------------------------------------------------- refresh
     def refresh(self):
@@ -806,6 +910,8 @@ class FocusWindow(QMainWindow):
                 self.show_checkin(message)
             elif view and view["phase"] == "work" and kind == "appblock":
                 self.show_app_alert(message)
+            elif view and kind == "complete":
+                self.play_sound("completion")
 
     def refresh_session(self, view, camera, browser, connected, now):
         phase = view["phase"]
@@ -959,6 +1065,12 @@ class FocusWindow(QMainWindow):
         if study.session_view() and not self.end_session():
             event.ignore()
             return
+        if self.settings_dialog is not None:
+            self.settings_dialog.close()
+        try:
+            self.sounds.stop()
+        except Exception:
+            pass
         self.timer.stop()
         self.frame_timer.stop()
         self.controller.stop()
