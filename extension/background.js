@@ -81,6 +81,43 @@ async function isAllowed(domain) {
   return (allowUntil[domain] || 0) > Date.now();
 }
 
+// Fully blocked sites (Settings > Blocked apps and sites). The engine sends the list with every reply and
+// the browser enforces it with redirect rules, so a blocked page never loads, with or without a session.
+// The rules live in the browser, so they keep working if the engine is closed, until the list changes.
+const BLOCKED_PAGE = "blocked.html";
+let syncedBlocklist = null;   // JSON of the list the installed rules were built from
+
+function validHosts(list) {
+  return Array.isArray(list)
+    ? [...new Set(list.filter((h) => typeof h === "string" && /^[a-z0-9.-]+\.[a-z0-9-]+$/.test(h)))].slice(0, 100)
+    : null;
+}
+
+async function syncBlocklist(list) {
+  const hosts = validHosts(list);
+  if (!hosts) return;   // reply without a list (older engine): leave the rules alone
+  const key = JSON.stringify(hosts);
+  if (key === syncedBlocklist) return;
+  const old = await chrome.declarativeNetRequest.getDynamicRules();
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: old.map((r) => r.id),
+    addRules: hosts.map((host, i) => ({
+      id: i + 1,
+      priority: 1,
+      action: { type: "redirect", redirect: { extensionPath: `/${BLOCKED_PAGE}#${host}` } },
+      condition: { requestDomains: [host], resourceTypes: ["main_frame"] },
+    })),
+  });
+  syncedBlocklist = key;
+  // tabs that are already open on a blocked site get the same page
+  for (const host of hosts) {
+    const tabs = await chrome.tabs.query({ url: [`*://${host}/*`, `*://*.${host}/*`] }).catch(() => []);
+    for (const t of tabs) {
+      chrome.tabs.update(t.id, { url: chrome.runtime.getURL(`${BLOCKED_PAGE}#${host}`) }).catch(() => {});
+    }
+  }
+}
+
 const BADGES = {
   "Focused": ["ON", "#1f7a4d"],
   "Distracted": ["!", "#b3261e"],
@@ -148,6 +185,7 @@ async function report(tabSwitched = false) {
       body: JSON.stringify(payload),
     });
     const status = await res.json();
+    syncBlocklist(status.blocked_sites).catch(() => {});
     const [text, color] = BADGES[status.state] || ["", "#4a5568"];
     chrome.action.setBadgeText({ text });
     chrome.action.setBadgeBackgroundColor({ color });

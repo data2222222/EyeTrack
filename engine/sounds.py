@@ -13,7 +13,7 @@ from preferences import validate_preferences
 
 
 _SAMPLE_RATE = 24000
-_EVENT_PREFERENCES = {"checkin": "sound_checkins", "completion": "sound_completion"}
+_EVENT_PREFERENCES = {"checkin": "sound_checkins", "completion": "sound_completion", "alarm": "sound_checkins"}
 _FREQUENCIES = {
     "chime": (659.25, 880.0, 1108.73),
     "bell": (523.25, 659.25, 783.99),
@@ -21,11 +21,18 @@ _FREQUENCIES = {
 }
 
 
-def _synthesize(event, style):
+def _synthesize(event, style, strictness="strict"):
     frequencies = _FREQUENCIES[style]
     if event == "checkin":
         frequencies = frequencies[:2]
     duration = 0.11 if event == "checkin" else 0.16
+    amplitude = 0.22
+    if event == "alarm":
+        frequencies, duration, amplitude = {
+            "light": ((660, 660), 0.12, 0.22),
+            "strict": ((880, 1175, 880, 1175), 0.10, 0.40),
+            "asian_parent": ((1175, 1568) * 3, 0.08, 0.50),
+        }.get(strictness, ((880, 1175, 880, 1175), 0.10, 0.40))
     note_samples = int(_SAMPLE_RATE * duration)
     silence_samples = int(_SAMPLE_RATE * 0.025)
     samples = array("h")
@@ -35,12 +42,14 @@ def _synthesize(event, style):
             envelope = math.sin(math.pi * progress) ** 2
             phase = 2 * math.pi * frequency * sample_index / _SAMPLE_RATE
             tone = math.sin(phase)
-            if style == "bell":
+            if event == "alarm":
+                tone = (tone + 0.25 * math.sin(phase * 3)) / 1.25
+            elif style == "bell":
                 tone = (tone + 0.2 * math.sin(phase * 2.01)) / 1.2
                 envelope *= math.exp(-2 * progress)
             elif style == "soft":
                 tone *= 0.7
-            samples.append(round(32767 * 0.22 * envelope * tone))
+            samples.append(round(32767 * amplitude * envelope * tone))
         samples.extend([0] * silence_samples)
     if sys.byteorder != "little":
         samples.byteswap()
@@ -126,7 +135,7 @@ class SoundPlayer:
             return False
         self.stop()
         try:
-            samples = _synthesize(event, values["sound_style"])
+            samples = _synthesize(event, values["sound_style"], values["alert_strictness"])
             self._output = _start_audio(samples, values["sound_volume"], self._parent)
         except Exception:
             self._output = None

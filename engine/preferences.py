@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 import tempfile
 
+import blocklist
+
 
 DEFAULTS = {
     "sounds_enabled": True,
@@ -18,28 +20,37 @@ DEFAULTS = {
     "sound_style": "chime",
     "sound_checkins": True,
     "sound_completion": True,
+    "alert_strictness": "strict",
     "camera_enabled": True,
     "show_preview": True,
     "work_minutes": 25,
     "break_minutes": 5,
     "mode": "pc",
+    "blocked_sites": [],
+    "blocked_apps": [],
 }
+_LISTS = {"blocked_sites": blocklist.clean_sites, "blocked_apps": blocklist.clean_apps}
 SOUND_STYLES = ("chime", "bell", "soft")
 _INTEGER_BOUNDS = {
     "sound_volume": (0, 100),
     "work_minutes": (1, 120),
     "break_minutes": (1, 60),
 }
-_CHOICES = {"sound_style": SOUND_STYLES, "mode": ("pc", "both")}
+_CHOICES = {"sound_style": SOUND_STYLES, "mode": ("pc", "both"),
+            "alert_strictness": ("light", "strict", "asian_parent")}
 
 
 def validate_preferences(values):
     """Return a fresh, complete preferences dict, ignoring unknown fields."""
-    validated = DEFAULTS.copy()
+    validated = {name: list(v) if isinstance(v, list) else v for name, v in DEFAULTS.items()}
     if not isinstance(values, Mapping):
         return validated
     for name, default in DEFAULTS.items():
         value = values.get(name, default)
+        if name in _LISTS:
+            # a malformed list falls back to empty; individually invalid entries are dropped
+            validated[name] = _LISTS[name](value)
+            continue
         if type(default) is bool:
             valid = type(value) is bool
         elif name in _INTEGER_BOUNDS:

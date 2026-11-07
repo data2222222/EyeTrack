@@ -337,6 +337,39 @@ def test_now_line_names_the_site_or_the_app_in_front(window):
     assert w.now_text(view, browser, False) == "Chrome not connected"
 
 
+def test_current_activity_is_a_separate_compact_card_with_plain_tab_titles(window):
+    w, _ = window
+    w.start_button.click()
+    view = study.session_view()
+    browser = {"domain": "example.com", "category": "productive", "title": "<Physics> & circuits"}
+    w.refresh_activity(view, browser, True)
+    assert w.active_app.parentWidget() is w.activity_card
+    assert w.active_tab.parentWidget() is w.activity_card
+    assert w.active_app.text() == "Chrome · work site"
+    assert w.active_tab.toolTip() == "<qt>example.com · &lt;Physics&gt; &amp; circuits</qt>"
+    assert w.active_tab.accessibleDescription() == "example.com · <Physics> & circuits"
+    from PySide6.QtCore import Qt
+    assert w.active_tab.textFormat() == Qt.TextFormat.PlainText
+    other = {"domain": "(outside browser)", "category": "other", "title": ""}
+    w.refresh_activity(dict(view, current_app=("discord", True)), other, True)
+    assert w.active_app.text() == "Discord · distracting app"
+    assert w.active_tab.text() == "Chrome is in the background"
+    w.refresh_activity(dict(view, current_app=None), other, False)
+    assert w.active_app.text() == "Active app unavailable"
+    assert w.active_tab.text() == "Chrome not connected"
+
+
+def test_current_activity_card_remains_visible_at_minimum_window_size(window, app):
+    w, _ = window
+    w.resize(900, 660)
+    w.start_button.click()
+    app.processEvents()
+    viewport = w.stack.currentWidget().viewport()
+    corner = w.activity_card.mapTo(viewport, w.activity_card.rect().bottomRight())
+    assert viewport.rect().contains(corner)
+    assert w.activity_card.height() < 110
+
+
 def test_old_reports_still_render_in_the_merged_card(window):
     w, _ = window
     old = {"website": {"work": 10.0, "unlisted": 5.0, "distraction": 2.0, "outside": 3.0, "unavailable": 0.0}}

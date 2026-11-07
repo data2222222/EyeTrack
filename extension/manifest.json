@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Study Focus Collector",
-  "version": "2.2",
-  "description": "Sends the active site's domain, URL path (no query), page title, scrolling and browser activity to the local Study Focus engine. Shows a focus screen on distracting sites during study sessions (started in the Study Focus window).",
-  "permissions": ["tabs", "activeTab", "idle", "storage", "alarms"],
+  "version": "2.3",
+  "description": "Sends the active site's domain, URL path (no query), page title, scrolling and browser activity to the local Study Focus engine. Shows a focus screen on distracting sites during study sessions (started in the Study Focus window). Fully blocks sites from your blocked list in Settings.",
+  "permissions": ["tabs", "activeTab", "idle", "storage", "alarms", "declarativeNetRequest"],
   "host_permissions": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     { "matches": ["http://*/*", "https://*/*"], "js": ["content.js"], "run_at": "document_start" }
   ],
-  "action": { "default_title": "Study Focus" }
+  "action": { "default_title": "Study Focus" },
+  "web_accessible_resources": [
+    { "resources": ["blocked.html", "blocked.js"], "matches": ["http://*/*", "https://*/*"] }
+  ]
 }

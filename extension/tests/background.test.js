@@ -4,6 +4,7 @@ const { join } = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+const plain = (value) => JSON.parse(JSON.stringify(value));   // objects made in the vm sandbox have foreign prototypes
 const backgroundSource = readFileSync(join(__dirname, "..", "background.js"), "utf8");
 
 function createEvent() {
@@ -18,7 +19,7 @@ function createEvent() {
   };
 }
 
-function createHarness(tabOverrides = {}) {
+function createHarness(tabOverrides = {}, { status = { state: "Distracted", index: 1, block: true } } = {}) {
   let now = 1_800_000_000_000;
   let engineAvailable = true;
   const activeTab = {
@@ -36,11 +37,22 @@ function createHarness(tabOverrides = {}) {
   const badgeTexts = [];
   const badgeColors = [];
   const actionTitles = [];
+  const ruleUpdates = [];
+  const redirected = [];
+  let rules = [];
   const chrome = {
     runtime: {
       onInstalled: createEvent(),
       onStartup: createEvent(),
       onMessage: createEvent(),
+      getURL(path) { return `chrome-extension://abc/${path}`; },
+    },
+    declarativeNetRequest: {
+      async getDynamicRules() { return rules; },
+      async updateDynamicRules({ removeRuleIds, addRules }) {
+        ruleUpdates.push({ removeRuleIds, addRules });
+        rules = rules.filter(({ id }) => !removeRuleIds.includes(id)).concat(addRules);
+      },
     },
     alarms: { create() {}, onAlarm: createEvent() },
     windows: {
@@ -49,10 +61,12 @@ function createHarness(tabOverrides = {}) {
     },
     tabs: {
       async query(query) {
+        if (query.url) return [{ ...activeTab }];   // blocked-site lookup
         assert.equal(query.active, true);
         assert.equal(query.lastFocusedWindow, true);
         return [{ ...activeTab }];
       },
+      async update(tabId, props) { redirected.push({ tabId, ...props }); },
       async sendMessage(tabId, message) {
         messages.push({ tabId, ...structuredClone(message) });
       },
@@ -94,11 +108,13 @@ function createHarness(tabOverrides = {}) {
       assert.equal(options.headers["Content-Type"], "application/json");
       reports.push(JSON.parse(options.body));
       if (!engineAvailable) throw new Error("Engine unavailable");
-      return { async json() { return { state: "Distracted", index: 1, block: true }; } };
+      return { async json() { return status; } };
     },
   }, { filename: "background.js" });
   return {
     reports,
+    ruleUpdates,
+    redirected,
     messages,
     badgeTexts,
     badgeColors,
@@ -263,4 +279,33 @@ test("engine unavailability clears an existing block and marks the badge off", a
   assert.equal(harness.badgeTexts.at(-1), "off");
   assert.equal(harness.badgeColors.at(-1), "#777777");
   assert.equal(harness.actionTitles.at(-1), "Study Focus: engine not running");
+});
+
+test("blocked sites become redirect rules once, and open tabs on them are redirected", async () => {
+  const status = { state: "Focused", index: 0, blocked_sites: ["reddit.com", "youtube.com"] };
+  const harness = createHarness({}, { status });
+  await harness.heartbeat();
+  await harness.heartbeat();   // same list: rules are not rebuilt
+
+  assert.equal(harness.ruleUpdates.length, 1);
+  const [{ addRules }] = harness.ruleUpdates;
+  assert.deepEqual(plain(addRules.map((rule) => rule.condition.requestDomains)), [["reddit.com"], ["youtube.com"]]);
+  assert.ok(addRules.every((rule) => rule.condition.resourceTypes.join() === "main_frame"));
+  assert.equal(addRules[0].action.redirect.extensionPath, "/blocked.html#reddit.com");
+  assert.ok(harness.redirected.some(({ tabId, url }) => tabId === 7 && url === "chrome-extension://abc/blocked.html#youtube.com"));
+
+  status.blocked_sites = [];
+  await harness.heartbeat();
+  assert.deepEqual(plain(harness.ruleUpdates[1].addRules), []);
+  assert.deepEqual(plain(harness.ruleUpdates[1].removeRuleIds), [1, 2]);
+});
+
+test("replies without a blocked-site list and malformed hosts leave the rules alone", async () => {
+  const status = { state: "Focused", index: 0, blocked_sites: ["bad host", 5, "*.evil"] };
+  const harness = createHarness({}, { status });
+  await harness.heartbeat();
+  assert.deepEqual(plain(harness.ruleUpdates[0].addRules), []);
+  delete status.blocked_sites;
+  await harness.heartbeat();
+  assert.equal(harness.ruleUpdates.length, 1);
 });

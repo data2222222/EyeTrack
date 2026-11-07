@@ -1,5 +1,7 @@
 # EyeTrack hackathon demo
 
+For the pitch script, timed live-demo runbook and slide outline, see the [presentation plan](PITCH_PLAN.md).
+
 ## Before presenting
 
 1. Run `python setup.py` and load `extension/` as an unpacked Chrome extension.

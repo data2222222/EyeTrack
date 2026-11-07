@@ -51,6 +51,7 @@ def test_integer_bounds_reject_bad_values_without_coercion(name, minimum, maximu
 
 @pytest.mark.parametrize("name,choices", [
     ("mode", ("pc", "both")), ("sound_style", ("chime", "bell", "soft")),
+    ("alert_strictness", ("light", "strict", "asian_parent")),
 ])
 def test_choices_are_validated(name, choices):
     for value in choices:

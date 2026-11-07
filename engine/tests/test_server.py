@@ -59,3 +59,19 @@ def test_get_status_ok_and_root_404(server):
 def test_foreign_origin_is_refused(server):
     status, _ = request(server, "GET", "/status", headers={"Origin": "https://evil.example"})
     assert status == 403
+
+
+@pytest.mark.parametrize("incognito,category,expected", [
+    (False, "productive", "<Physics> & circuits"),
+    (True, "productive", ""),
+    (False, "other", ""),
+])
+def test_current_tab_title_is_in_memory_only_and_hidden_for_incognito(server, monkeypatch, incognito, category, expected):
+    monkeypatch.setattr(engine, "browser", dict(engine.browser, title="Previous page"))
+    monkeypatch.setattr(engine, "jev", None)
+    body = json.dumps({"domain": "example.com", "category": category, "incognito": incognito,
+                       "title": "<Physics> & circuits"})
+    status, data = request(server, "POST", "/activity", body, {"Content-Type": "application/json"})
+    assert status == 200
+    assert engine.browser["title"] == expected
+    assert "title" not in data

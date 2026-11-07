@@ -16,6 +16,14 @@ SCAN_INTERVAL = 2.0          # seconds between scans on the worker thread
 FRESH_SECONDS = 6.0          # a scan stays valid this long (a few missed scans are tolerated)
 ALERT_COOLDOWN = 120.0       # seconds before the same app can alert again
 SUBPROCESS_TIMEOUT = 1.5
+# Never terminated even if a blocked-app entry happens to prefix them (e.g. "sys" or "exp").
+PROTECTED = frozenset({
+    "system", "systemd", "init", "launchd", "kernel_task", "kthreadd", "dbus-daemon", "dbus-broker", "sshd",
+    "xorg", "xwayland", "wayland", "gnome-shell", "plasmashell", "kwin", "mutter", "login", "loginwindow",
+    "windowserver", "finder", "dock", "explorer", "dwm", "winlogon", "csrss", "wininit", "services", "lsass",
+    "svchost", "smss", "taskmgr", "cmd", "powershell", "pwsh", "conhost", "bash", "zsh", "fish", "sh",
+    "python", "python3", "pythonw", "eyetrack",
+})
 
 
 def normalize(name):
@@ -31,6 +39,27 @@ def matches(name, watchlist):
     """Whole-name prefix match, so 'steam' covers 'steamwebhelper' but not 'upsteam-tool'."""
     name = normalize(name)
     return bool(name) and any(name.startswith(token) for token in watchlist)
+
+
+def blocked_match(name, blocked):
+    """Whole-name prefix match against the blocked list, minus protected system processes."""
+    name = normalize(name)
+    return bool(name) and name not in PROTECTED and any(name.startswith(token) for token in blocked)
+
+
+def terminate(pid, name):
+    """Politely ask one process to exit; False if it is gone, not ours, or no longer that app.
+
+    The name is re-read first so a recycled pid is never signalled by mistake."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        if normalize(proc.name()) != name:
+            return False
+        proc.terminate()
+        return True
+    except Exception:
+        return False
 
 
 def load_watchlist(config_path):
@@ -128,6 +157,15 @@ def scan():
     return Snapshot(processes, foreground_pid())
 
 
+def _ancestor_pids():
+    """Parents of this process (launcher shell, terminal): never closed by a blocked-app entry."""
+    try:
+        import psutil
+        return frozenset(p.pid for p in psutil.Process().parents())
+    except Exception:
+        return frozenset()
+
+
 # ---------------------------------------------------------------- monitor
 class AppMonitor:
     """Scans on a worker thread; observe() is cheap and safe to call from the UI timer.
@@ -138,13 +176,20 @@ class AppMonitor:
     come to the front, and nothing is queued across pauses or breaks."""
 
     def __init__(self, scanner=scan, watchlist=DEFAULT_DISTRACTING, interval=SCAN_INTERVAL,
-                 cooldown=ALERT_COOLDOWN, clock=None, own_pid=None):
+                 cooldown=ALERT_COOLDOWN, clock=None, own_pid=None, blocked=(), killer=terminate,
+                 protected_pids=()):
         self.scanner = scanner
+        self.killer = killer
+        self.set_blocked(blocked)
+        self.protected_pids = frozenset(protected_pids)
+        self.closed = []              # recently closed blocked-app names, drained by take_closed()
         self.watchlist = tuple(normalize(t) for t in watchlist if normalize(t))
         self.interval = interval
         self.cooldown = cooldown
         self.clock = clock or (lambda: time.monotonic())   # looked up late so tests can fake time
         self.own_pid = os.getpid() if own_pid is None else own_pid
+        if own_pid is None:
+            self.protected_pids = self.protected_pids | _ancestor_pids()
         self.available = True
         self._lock = threading.Lock()
         self._snapshot = None
@@ -154,6 +199,17 @@ class AppMonitor:
         self._last_alert = {}
         self._stop = threading.Event()
         self._worker = None
+
+    def set_blocked(self, names):
+        """Replace the fully blocked app list; takes effect on the next scan."""
+        from blocklist import normalize_app
+        self.blocked = tuple(sorted({n for n in map(normalize_app, names) if n}))
+
+    def take_closed(self):
+        """Names of blocked apps closed since the last call (for a one-line notice in the UI)."""
+        with self._lock:
+            closed, self.closed = self.closed, []
+        return closed
 
     # worker side
     def refresh(self):
@@ -167,6 +223,24 @@ class AppMonitor:
                 return
             self.available = True
             self._snapshot, self._observed_at = snapshot, self.clock()
+        self.enforce(snapshot)
+
+    def enforce(self, snapshot):
+        """Close every running process on the blocked list. Runs on the worker thread, whether or
+        not a session is active, so a blocked app is gone within one scan of opening."""
+        blocked = self.blocked
+        if not blocked:
+            return
+        keep = {self.own_pid, *self.protected_pids}
+        closed = set()
+        for pid, name in snapshot.processes.items():
+            if pid in keep or not blocked_match(name, blocked):
+                continue
+            if self.killer(pid, name):
+                closed.add(name)
+        if closed:
+            with self._lock:
+                self.closed.extend(sorted(closed - set(self.closed)))
 
     def start(self):
         if self._worker is not None:

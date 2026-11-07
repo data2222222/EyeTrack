@@ -127,6 +127,22 @@ def test_stop_tolerates_deleted_qt_objects(audio):
     sink.deleteLater.assert_called_once()
 
 
+def test_alarm_bursts_are_distinct_and_follow_strictness(audio):
+    waves = [sounds._synthesize("alarm", "chime", mode)
+             for mode in ("light", "strict", "asian_parent")]
+    assert len(set(waves)) == 3
+    assert len(waves[0]) < len(waves[1]) < len(waves[2]) < sounds._SAMPLE_RATE * 2
+    for mode in ("light", "strict", "asian_parent"):
+        assert sounds.SoundPlayer().play("alarm", {"alert_strictness": mode})
+        assert audio[0].call_args.args[1] == 35
+
+
+@pytest.mark.parametrize("settings", [{"sounds_enabled": False}, {"sound_volume": 0}, {"sound_checkins": False}])
+def test_alarm_honours_mute_volume_and_checkin_toggle(audio, settings):
+    assert not sounds.SoundPlayer().play("alarm", settings)
+    audio[0].assert_not_called()
+
+
 @pytest.mark.parametrize("style", preferences.SOUND_STYLES)
 def test_tones_are_short_bounded_pcm_with_gentle_endpoints(style):
     waveforms = []

@@ -34,6 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import appmonitor
+import blocklist
 import phone_detection
 import study
 import tracking
@@ -74,8 +75,6 @@ DOOM_SCROLL_PX = 8000            # scrolled pixels per minute (~8 screens) on a 
 DOOM_SWIPES = 4                  # or this many new videos per minute in a short-video feed
 DOOM_AFTER_SECONDS = 60          # sustained this long -> "Doom-scrolling"
 PHONE_AFTER_SECONDS = 3          # phone visible this long -> "On Phone"
-PHONE_NUDGE_SECONDS = 20
-PHONE_COOLDOWN = 5 * 60
 PHONE_SCORE = phone_detection.RAW_SCORE_THRESHOLD    # lenient raw threshold; PhoneTracker filters
 PHONE_EVERY_N_FRAMES = phone_detection.DETECT_EVERY_N_FRAMES  # detector cadence (CPU vs. latency)
 CONTEXT_WINDOW = 30 * 60         # context-switch stats over the last 30 minutes
@@ -144,6 +143,7 @@ camera_controller = None
 app_monitor = None                    # appmonitor.AppMonitor while the engine runs
 show_preview = True
 browser = {"domain": "waiting for extension", "category": "neutral", "idle": "active",
+           "title": "",
            "switches": 0, "updated": 0.0, "scroll_px": 0, "swipes": 0, "feed": False,
            "category_source": "list", "category_confidence": None, "category_pending": False}
 jev = None            # goal-aware classifier (engine/classifier), None if unavailable
@@ -178,6 +178,19 @@ demo_requests = []                    # filled by global hotkeys (other thread)
 def emit(kind, message):
     """Queue a popup for the window."""
     events.append((kind, message))
+
+
+blocked_sites = []                    # hostnames the extension refuses to open (sent with every reply)
+
+
+def set_blocklist(sites, apps):
+    """Apply the user's fully blocked sites and apps; the monitor closes apps within one scan and the
+    extension picks the sites up on its next report."""
+    global blocked_sites
+    with lock:
+        blocked_sites = blocklist.clean_sites(sites)
+    if app_monitor is not None:
+        app_monitor.set_blocked(blocklist.clean_apps(apps))
 
 
 def assess(category, idle, switches, present, facing, missing_seconds, on_phone=False, doom=False):
@@ -295,6 +308,9 @@ def tick(dt):
     for message in app_alerts:
         study.record_event("app")
         emit("appblock", message)
+    if app_monitor:
+        for name in app_monitor.take_closed():
+            emit("appclosed", f"{name.title()} is on your blocked list, so it was closed.")
 
     # doom-scrolling: lots of scrolling / short videos on a non-study site, sustained
     if is_doom_scrolling(b, now):
@@ -364,11 +380,7 @@ def tick(dt):
                            "non-stop for a minute. That's doom-scrolling.\n"
                            "Close it and get back to your goal?")
 
-    if (on_phone and c["phone_since"] and now - c["phone_since"] >= PHONE_NUDGE_SECONDS
-            and not on_break and now - last_alert.get("phone", -1e9) >= PHONE_COOLDOWN):
-        last_alert["phone"] = now
-        emit("phone", "Your phone has been in your hand for 20 seconds.\n"
-                      "Put it face down, out of reach,\nand get back to studying.")
+    # The desktop's monotonic PhoneAlerts cadence handles phone chimes and alarms.
 
     if session["since_break"] >= BREAK_AFTER_SECONDS:
         session["since_break"] = 0
@@ -496,7 +508,8 @@ def snapshot():
                 "domain": browser["domain"], "category": browser["category"],
                 "category_source": browser["category_source"],
                 "category_confidence": browser["category_confidence"],
-                "camera": camera_text(), "expression": camera["expression"]}
+                "camera": camera_text(), "expression": camera["expression"],
+                "blocked_sites": list(blocked_sites)}
     sv = study.session_view()
     snap["focus_mode"] = bool(sv and sv["phase"] == "work")
     snap["block"] = snap["focus_mode"] and snap["category"] == "distraction"
@@ -582,6 +595,8 @@ class Handler(BaseHTTPRequestHandler):
                 if domain != browser["domain"] and browser["updated"]:
                     switch_log.append(now)
                 browser["domain"] = domain
+                browser["title"] = (str(data.get("title") or "").strip()[:200]
+                                    if not data.get("incognito") and data.get("category") != "other" else "")
                 if data.get("category") in ("productive", "distraction", "neutral", "other"):
                     browser["category"] = data["category"]
                 # Jev/cache/override replace the list category; local guesses never do (list stays)
@@ -1782,6 +1797,12 @@ def main():
     camera_controller = CameraController(args.camera_index, args.no_camera)
     app_monitor = appmonitor.AppMonitor(
         watchlist=appmonitor.load_watchlist(os.path.join(study.DATA_DIR, "config.json")))
+    try:
+        import preferences
+        saved = preferences.load_preferences()
+        set_blocklist(saved["blocked_sites"], saved["blocked_apps"])
+    except OSError:
+        pass                                  # unreadable preferences: the window reports it
     app_monitor.start()
     try:
         run_ui(args.no_camera, False, args.compact)

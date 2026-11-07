@@ -1,12 +1,13 @@
 """Settings reached from the header menu: saving, cancelling, next-session semantics and sound cues."""
 import os
+import json
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QScrollArea, QWidget
+from PySide6.QtWidgets import QApplication, QLineEdit, QScrollArea, QWidget
 
 import engine
 import preferences
@@ -435,3 +436,218 @@ def test_closing_settings_disconnects_focus_following(window, app, monkeypatch):
     dialog.reject()
     app.focusChanged.emit(None, dialog.preview_default)
     assert not revealed
+
+
+def test_jev_control_is_last_masked_and_write_only(window, app, tmp_path, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    w, _ = window
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"typesafe_api_key": "old-test-secret", "apps": {"distracting": ["steam"]}}))
+    dialog = open_from_menu(w, app)
+    assert dialog.jev_key.echoMode() == QLineEdit.EchoMode.Password
+    assert dialog.jev_key.text() == ""
+    assert "saved" in dialog.jev_status.text()
+    assert dialog.jev_key.mapTo(dialog.settings_body, dialog.jev_key.rect().topLeft()).y() > (
+        dialog.preview_default.mapTo(dialog.settings_body, dialog.preview_default.rect().topLeft()).y())
+    dialog.jev_key.setText("new-test-secret")
+    dialog.set_key_button.click()
+    assert dialog.jev_key.text() == ""
+    assert "Restart EyeTrack" in dialog.jev_status.text()
+    assert "new-test-secret" not in dialog.jev_status.text()
+    assert json.loads(path.read_text()) == {"typesafe_api_key": "new-test-secret", "apps": {"distracting": ["steam"]}}
+    assert not saved_file(tmp_path).exists()
+    dialog.cancel_button.click()
+    dialog = open_from_menu(w, app)
+    assert dialog.jev_key.text() == ""
+    assert "typesafe_api_key" not in dialog.values()
+    dialog.jev_key.setText("unsaved-test-secret")
+    dialog.reject()
+    assert dialog.jev_key.text() == ""
+    assert json.loads(path.read_text())["typesafe_api_key"] == "new-test-secret"
+
+
+def test_jev_save_failure_keeps_existing_configuration_and_shows_safe_error(window, app, tmp_path):
+    w, _ = window
+    path = tmp_path / "config.json"
+    path.write_text("{")
+    dialog = open_from_menu(w, app)
+    dialog.jev_key.setText("fake-test-secret")
+    dialog.set_key_button.click()
+    assert dialog.error.isVisibleTo(dialog)
+    assert "fake-test-secret" not in dialog.error.text()
+    assert path.read_text() == "{"
+
+
+def test_strictness_saves_during_work_without_changing_session(window, app):
+    w, clock = window
+    w.start_button.click()
+    before = study.session_view()
+    dialog = open_from_menu(w, app)
+    assert dialog.strictness_box.currentData() == "strict"
+    dialog.strictness_box.setCurrentIndex(dialog.strictness_box.findData("asian_parent"))
+    assert "10 seconds" in dialog.strictness_note.text()
+    dialog.save_button.click()
+    assert w.prefs["alert_strictness"] == "asian_parent"
+    assert preferences.load_preferences()["alert_strictness"] == "asian_parent"
+    assert study.session_view() == before
+
+
+def test_phone_chimes_and_escalates_even_with_an_existing_checkin(window, monkeypatch):
+    w, clock = window
+    played = []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    w.start_button.click()
+    engine.camera.update(phone=True, phone_tentative=False, phone_since=clock[0] + 100000)
+    w.show_checkin("Another check-in")
+    played.clear()
+    w.refresh()
+    for _ in range(30):
+        clock[0] += .5
+        w.refresh()
+    assert played == ["checkin", "alarm"]
+    assert "stop the alarm" in w.checkin_message.text()
+    counts = study.session_view()["counts"].copy()
+    w.dismiss_checkin()
+    for _ in range(6):
+        clock[0] += .5
+        w.refresh()
+    assert played == ["checkin", "alarm", "alarm"]
+    assert study.session_view()["counts"] == counts
+    assert w.checkin_visible
+    engine.camera.update(phone=False, phone_since=None)
+    w.refresh()
+    assert not w.checkin_visible and w.phone_alerts.since is None
+
+
+@pytest.mark.parametrize("reason", ["paused", "break", "complete", "no_camera", "stale", "tentative", "camera_off"])
+def test_phone_alerts_ignore_inactive_or_unreliable_observations(window, reason, monkeypatch):
+    w, clock = window
+    w.start_button.click()
+    played, stopped = [], []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    monkeypatch.setattr(w.sounds, "stop", lambda: stopped.append(True))
+    view = study.session_view()
+    camera = dict(engine.camera, phone=True, phone_tentative=False, observed_at=clock[0], status="ok")
+    for i in range(31):
+        camera["observed_at"] = clock[0] + i * .5
+        w.refresh_camera_alerts(view, camera, clock[0] + i * .5)
+    assert played == ["checkin", "alarm"]
+
+    now = clock[0] + 16
+    camera["observed_at"] = now
+    if reason in ("paused", "break", "complete"):
+        view = dict(view, phase=reason)
+    elif reason == "no_camera":
+        view = dict(view, camera_enabled=False)
+    elif reason == "stale":
+        camera["observed_at"] = now - 2
+    elif reason == "tentative":
+        camera["phone_tentative"] = True
+    else:
+        camera["status"] = "off"
+    w.refresh_camera_alerts(view, camera, now)
+    assert w.phone_alerts.since is None and stopped
+    assert not w.checkin_visible
+    assert played == ["checkin", "alarm"]
+
+
+@pytest.mark.parametrize("mode,after,repeat", [("light", 30, 10), ("strict", 15, 3), ("asian_parent", 10, 1)])
+@pytest.mark.parametrize("present", [True, False])
+def test_looking_away_uses_strictness_and_stops_on_return(window, monkeypatch, mode, after, repeat, present):
+    w, clock = window
+    w.start_button.click()
+    w.prefs["alert_strictness"] = mode
+    engine.camera.update(present=present, facing=False, phone=False, looking_down=False)
+    played, stopped = [], []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    monkeypatch.setattr(w.sounds, "stop", lambda: stopped.append(True))
+    w.refresh()
+    for second in range(1, after + 1):
+        clock[0] += 1
+        w.refresh()
+        if second < 3:
+            assert not played
+        elif second < after:
+            assert played == ["checkin"]
+    assert played == ["checkin", "alarm"]
+    assert "Return to your task" == w.checkin_title.text()
+    counts = study.session_view()["counts"].copy()
+    w.dismiss_checkin()
+    for _ in range(repeat):
+        clock[0] += 1
+        w.refresh()
+    assert played == ["checkin", "alarm", "alarm"]
+    assert w.checkin_visible
+    assert study.session_view()["counts"] == counts
+    engine.camera.update(present=True, facing=True)
+    w.refresh()
+    assert not w.checkin_visible and w.away_alerts.since is None and stopped
+    assert study.session_view()["phase"] == "work"
+
+
+@pytest.mark.parametrize("reason", ["paused", "break", "complete", "no_session", "no_camera", "stale", "missing", "future", "camera_off", "screen", "paper"])
+def test_looking_away_alerts_reset_when_inactive_or_unobserved(window, monkeypatch, reason):
+    w, clock = window
+    w.start_button.click()
+    played, stopped = [], []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    monkeypatch.setattr(w.sounds, "stop", lambda: stopped.append(True))
+    view = study.session_view()
+    camera = dict(engine.camera, present=True, facing=False, looking_down=False, phone=False, status="ok")
+    for i in range(16):
+        camera["observed_at"] = clock[0] + i
+        w.refresh_camera_alerts(view, camera, clock[0] + i)
+    assert played == ["checkin", "alarm"]
+    now = clock[0] + 16
+    camera["observed_at"] = now
+    if reason in ("paused", "break", "complete"):
+        view = dict(view, phase=reason)
+    elif reason == "no_session":
+        view = None
+    elif reason == "no_camera":
+        view = dict(view, camera_enabled=False)
+    elif reason in ("stale", "missing", "future"):
+        camera["observed_at"] = {"stale": now - 2, "missing": None, "future": now + 1}[reason]
+    elif reason == "camera_off":
+        camera["status"] = "off"
+    elif reason == "screen":
+        camera["facing"] = True
+    else:
+        view = dict(view, mode="both")
+        camera["looking_down"] = True
+    w.refresh_camera_alerts(view, camera, now)
+    assert played == ["checkin", "alarm"]
+    assert w.away_alerts.since is None and stopped and not w.checkin_visible
+
+
+def test_looking_away_strictness_changes_and_switching_to_phone_restarts_timer(window, monkeypatch):
+    w, clock = window
+    w.start_button.click()
+    w.settings_saved(dict(w.prefs, alert_strictness="light"))
+    engine.camera.update(present=True, facing=False, looking_down=False, phone=False)
+    played = []
+    monkeypatch.setattr(w, "play_sound", played.append)
+    w.refresh()
+    for _ in range(15):
+        clock[0] += 1
+        w.refresh()
+    assert played == ["checkin"]
+    w.settings_saved(dict(w.prefs, alert_strictness="strict"))
+    w.refresh()
+    assert played == ["checkin", "alarm"]
+    engine.camera.update(phone=True, phone_tentative=False)
+    w.refresh()
+    assert w.away_alerts.since is None and not w.checkin_visible
+    for _ in range(3):
+        clock[0] += 1
+        w.refresh()
+    assert played == ["checkin", "alarm", "checkin"]
+    assert w.checkin_title.text() == "Phone check-in"
+    engine.camera["phone"] = False
+    w.refresh()
+    assert w.phone_alerts.since is None and not w.checkin_visible
+    for _ in range(3):
+        clock[0] += 1
+        w.refresh()
+    assert played == ["checkin", "alarm", "checkin", "checkin"]
+    assert w.checkin_title.text() == "Looking-away check-in"
